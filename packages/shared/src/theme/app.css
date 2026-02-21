@@ -1,0 +1,27 @@
+/* -------------------------------------------------------
+   Global stylesheet — imported by every app's index.ts
+   Order matters: Tailwind → Skeleton utilities → Skeleton theme
+------------------------------------------------------- */
+
+/* Tailwind CSS v4 base layers */
+@import "tailwindcss";
+
+/* Skeleton v4 component utilities */
+@import "@skeletonlabs/skeleton";
+
+/* Active theme — swap for any theme in @skeletonlabs/skeleton/themes/ */
+@import "@skeletonlabs/skeleton/themes/cerberus";
+
+/* -------------------------------------------------------
+   App-level overrides and design tokens go below.
+   Prefer Skeleton/Tailwind utilities over custom CSS.
+------------------------------------------------------- */
+
+html,
+body,
+#app {
+	height: 100%;
+	margin: 0;
+	padding: 0;
+	overflow: hidden;
+}

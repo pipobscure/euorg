@@ -1,0 +1,23 @@
+{
+	"name": "euorg",
+	"version": "0.1.0",
+	"description": "Calendar, Contacts, Mail and Notes — an Electrobun + Svelte + Skeleton suite",
+	"workspaces": ["apps/*", "packages/*"],
+	"scripts": {
+		"setup": "bun scripts/setup-workspaces.ts",
+		"build": "bun scripts/setup-workspaces.ts && bun run --filter './apps/*' build",
+		"dev:calendar": "bun scripts/setup-workspaces.ts && bun run --filter '@euorg/calendar' dev",
+		"dev:contacts": "bun scripts/setup-workspaces.ts && bun run --filter '@euorg/contacts' dev",
+		"dev:mail": "bun scripts/setup-workspaces.ts && bun run --filter '@euorg/mail' dev",
+		"dev:notes": "bun scripts/setup-workspaces.ts && bun run --filter '@euorg/notes' dev"
+	},
+	"devDependencies": {
+		"@skeletonlabs/skeleton": "^4.12.0",
+		"@tailwindcss/postcss": "^4.2.0",
+		"@types/bun": "latest",
+		"bun-plugin-svelte": "^0.0.6",
+		"postcss": "^8.5.6",
+		"svelte": "^5.53.1",
+		"tailwindcss": "^4.2.0"
+	}
+}

@@ -1,0 +1,14 @@
+{
+	"name": "@euorg/contacts",
+	"version": "0.1.0",
+	"scripts": {
+		"build:views": "bun scripts/build-views.ts",
+		"build:views:dev": "bun scripts/build-views.ts --dev",
+		"build": "bun run build:views && electrobun build",
+		"dev": "bun run build:views:dev && electrobun dev"
+	},
+	"dependencies": {
+		"@euorg/shared": "workspace:*",
+		"electrobun": "1.13.1"
+	}
+}

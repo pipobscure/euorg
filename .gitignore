@@ -1,0 +1,13 @@
+node_modules/
+apps/*/node_modules/
+packages/*/node_modules/
+
+# Electrobun build outputs (per-app)
+apps/*/build/
+apps/*/artifacts/
+
+# View pre-build intermediates
+apps/*/.build-views/
+
+# Electrobun runtime symlinks (created by bun run setup)
+apps/*/dist-*/
