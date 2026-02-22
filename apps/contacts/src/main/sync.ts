@@ -11,13 +11,32 @@
  *  4. Remove locally-deleted contacts from DB + disk
  */
 
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from "fs";
+import { writeFileSync, readFileSync, unlinkSync, existsSync, appendFileSync, mkdirSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 import {
 	readAccounts,
 	allEnabledCollections,
 	type EuorgAccount,
 	type CardDavCollection,
 } from "@euorg/shared/euorg-accounts.ts";
+
+// ── Sync log ──────────────────────────────────────────────────────────────────
+
+const LOG_DIR = join(homedir(), ".euorg", "contacts");
+const LOG_PATH = join(LOG_DIR, "sync.log");
+
+function logSyncResult(result: SyncResult): void {
+	const ts = new Date().toISOString();
+	const summary = `[${ts}] Sync: +${result.added} added, ${result.updated} updated, ${result.deleted} deleted, ${result.errors.length} error(s)`;
+	const lines = [summary, ...result.errors.map((e) => `  ERROR: ${e}`)].join("\n") + "\n";
+	try {
+		mkdirSync(LOG_DIR, { recursive: true });
+		appendFileSync(LOG_PATH, lines, "utf8");
+	} catch {
+		// Logging failure is non-fatal
+	}
+}
 import type { ContactsDB } from "./db.ts";
 import * as carddav from "./carddav.ts";
 import { parseVCard } from "./vcard.ts";
@@ -75,6 +94,7 @@ export async function syncAll(db: ContactsDB, onProgress: ProgressCallback): Pro
 	}
 
 	onProgress({ phase: "done", done, total: done });
+	logSyncResult(result);
 	return result;
 }
 

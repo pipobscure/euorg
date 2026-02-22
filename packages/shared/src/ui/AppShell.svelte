@@ -35,7 +35,7 @@
 			</aside>
 		{/if}
 
-		<main class="flex-1 overflow-auto">
+		<main class="flex-1 flex flex-col overflow-hidden">
 			{@render children()}
 		</main>
 	</div>

@@ -95,7 +95,7 @@ function accountToView(a: EuorgAccount): AccountView {
 		serverUrl: a.serverUrl,
 		username: a.username,
 		enabled: a.enabled,
-		defaultCollectionId: a.carddav.defaultCollectionId,
+		defaultCollectionId: a.carddav?.defaultCollectionId ?? null,
 	};
 }
 
@@ -151,13 +151,17 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 
 			// ── Accounts ───────────────────────────────────────────────────────
 			async getAccounts() {
-				return readAccounts().accounts.map(accountToView);
+				// Only expose dav accounts with carddav to the contacts app
+				return readAccounts().accounts
+					.filter((a) => a.accountType === "dav" && a.carddav)
+					.map(accountToView);
 			},
 
 			async addAccount({ name, serverUrl, username, password }) {
 				const id = crypto.randomUUID();
 				const newAccount: EuorgAccount = {
 					id,
+					accountType: "dav",
 					name,
 					serverUrl,
 					username,
@@ -208,7 +212,7 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 			async getCollections({ accountId }) {
 				const account = getAccount(readAccounts(), accountId);
 				if (!account) return [];
-				return account.carddav.collections.map((c) => collectionToView(accountId, c));
+				return (account.carddav?.collections ?? []).map((c) => collectionToView(accountId, c));
 			},
 
 			async rediscoverCollections({ accountId }) {
@@ -222,7 +226,7 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 					password: account.password,
 				});
 
-				const existingById = new Map(account.carddav.collections.map((c) => [c.id, c]));
+				const existingById = new Map((account.carddav?.collections ?? []).map((c) => [c.id, c]));
 				const merged = remote.map((rc) => ({
 					id: rc.id,
 					url: rc.url,
@@ -230,7 +234,7 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 					enabled: existingById.get(rc.id)?.enabled ?? true,
 				}));
 
-				writeAccounts(upsertAccount(cfg, { ...account, carddav: { ...account.carddav, collections: merged } }));
+				writeAccounts(upsertAccount(cfg, { ...account, carddav: { ...(account.carddav ?? { defaultCollectionId: null, collections: [] }), collections: merged } }));
 				return merged.map((c) => collectionToView(accountId, c));
 			},
 
@@ -255,12 +259,12 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 				const account = getAccount(cfg, accountId);
 				if (!account) throw new Error(`Account ${accountId} not found`);
 				writeAccounts(
-					upsertAccount(cfg, { ...account, carddav: { ...account.carddav, defaultCollectionId: collectionId } }),
+					upsertAccount(cfg, { ...account, carddav: { ...(account.carddav ?? { defaultCollectionId: null, collections: [] }), defaultCollectionId: collectionId } }),
 				);
 			},
 
 			async getDefaultCollection({ accountId }) {
-				return getAccount(readAccounts(), accountId)?.carddav.defaultCollectionId ?? null;
+				return getAccount(readAccounts(), accountId)?.carddav?.defaultCollectionId ?? null;
 			},
 
 			async testAccount({ serverUrl, username, password }) {

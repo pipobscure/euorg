@@ -40,11 +40,46 @@ export interface CardDavConfig {
 	collections: CardDavCollection[];
 }
 
+export interface CalDavCalendar {
+	/** Stable identifier: btoa(url) with padding stripped */
+	id: string;
+	/** Full URL to the calendar collection */
+	url: string;
+	name: string;
+	/** Hex color, e.g. "#6366f1" */
+	color: string;
+	enabled: boolean;
+}
+
+export interface CalDavConfig {
+	/** Discovered CalDAV home-set URL (cached) */
+	homeUrl: string | null;
+	defaultCalendarId: string | null;
+	calendars: CalDavCalendar[];
+}
+
+export interface SmtpConfig {
+	host: string;
+	port: number;
+	/** true = implicit TLS (port 465), false = STARTTLS (port 587) */
+	secure: boolean;
+	username: string;
+	fromName: string;
+	fromEmail: string;
+	// smtpPassword is stored in the OS keystore under key "${accountId}:smtp"
+}
+
 export interface EuorgAccount {
 	id: string;
+	/**
+	 * "dav" — a CardDAV/CalDAV account (contacts + calendar sync).
+	 * "smtp" — a standalone SMTP account (for sending mail/invitations).
+	 * Defaults to "dav" when absent (backward compatibility).
+	 */
+	accountType: "dav" | "smtp";
 	/** Human-readable display name, e.g. "mailbox.org" */
 	name: string;
-	/** Base server URL, used for CardDAV discovery (e.g. "https://dav.mailbox.org") */
+	/** Base server URL — for dav: DAV discovery root; for smtp: not used */
 	serverUrl: string;
 	username: string;
 	/**
@@ -54,7 +89,12 @@ export interface EuorgAccount {
 	password: string;
 	/** Whether this account is active; disabled accounts are skipped during sync */
 	enabled: boolean;
-	carddav: CardDavConfig;
+	/** CardDAV config — present on dav accounts that have been discovered by contacts */
+	carddav?: CardDavConfig;
+	/** CalDAV config — present on dav accounts that have been discovered by calendar */
+	caldav?: CalDavConfig;
+	/** SMTP config — required on smtp accounts; absent on dav accounts */
+	smtp?: SmtpConfig;
 }
 
 export interface EuorgAccountsConfig {
@@ -95,6 +135,11 @@ export function readAccounts(): EuorgAccountsConfig {
 	let needsWrite = false;
 
 	for (const account of cfg.accounts) {
+		// Normalize missing accountType (backward compat with existing accounts.json)
+		if (!account.accountType) {
+			account.accountType = "dav";
+			needsWrite = true;
+		}
 		if (account.password) {
 			// Legacy plaintext password — migrate to keystore and clear from JSON
 			storePassword(account.id, account.password);
@@ -106,7 +151,6 @@ export function readAccounts(): EuorgAccountsConfig {
 	}
 
 	if (needsWrite) {
-		// Persist the cleared version (strip the just-populated runtime passwords)
 		writeAccountsRaw({
 			...cfg,
 			accounts: cfg.accounts.map((a) => ({ ...a, password: "" })),
@@ -157,20 +201,38 @@ export function removeAccount(cfg: EuorgAccountsConfig, id: string): EuorgAccoun
 	return { ...cfg, accounts: cfg.accounts.filter((a) => a.id !== id) };
 }
 
-/** Returns all collection IDs that belong to enabled accounts and are themselves enabled. */
+/** Returns all collection IDs that belong to enabled dav accounts with carddav configured. */
 export function enabledCollectionIds(cfg: EuorgAccountsConfig): string[] {
 	return cfg.accounts
-		.filter((a) => a.enabled)
-		.flatMap((a) => a.carddav.collections.filter((c) => c.enabled).map((c) => c.id));
+		.filter((a) => a.enabled && a.carddav)
+		.flatMap((a) => (a.carddav!.collections.filter((c) => c.enabled).map((c) => c.id)));
 }
 
-/** Returns all enabled accounts with all their enabled collections flattened. */
+/** Returns all enabled dav accounts with their enabled collections flattened. */
 export function allEnabledCollections(
 	cfg: EuorgAccountsConfig,
 ): Array<{ account: EuorgAccount; collection: CardDavCollection }> {
 	return cfg.accounts
+		.filter((a) => a.enabled && a.carddav)
+		.flatMap((a) =>
+			a.carddav!.collections.filter((c) => c.enabled).map((c) => ({ account: a, collection: c })),
+		);
+}
+
+/** Returns all calendar IDs that belong to enabled accounts and are themselves enabled. */
+export function enabledCalendarIds(cfg: EuorgAccountsConfig): string[] {
+	return cfg.accounts
+		.filter((a) => a.enabled)
+		.flatMap((a) => (a.caldav?.calendars ?? []).filter((c) => c.enabled).map((c) => c.id));
+}
+
+/** Returns all enabled accounts with all their enabled calendars flattened. */
+export function allEnabledCalendars(
+	cfg: EuorgAccountsConfig,
+): Array<{ account: EuorgAccount; calendar: CalDavCalendar }> {
+	return cfg.accounts
 		.filter((a) => a.enabled)
 		.flatMap((a) =>
-			a.carddav.collections.filter((c) => c.enabled).map((c) => ({ account: a, collection: c })),
+			(a.caldav?.calendars ?? []).filter((c) => c.enabled).map((c) => ({ account: a, calendar: c })),
 		);
 }

@@ -1,15 +1,444 @@
 <script lang="ts">
-	import AppShell from "@euorg/shared/ui/AppShell.svelte";
+	import { onMount } from "svelte";
+	import { rpc } from "./lib/rpc.ts";
+	import type {
+		EventInstance,
+		CalendarView,
+		AccountView,
+		SyncProgress,
+		SyncResult,
+		ViewMode,
+		EventInput,
+		RecurringEditScope,
+		CalendarPrefs,
+	} from "./lib/types.ts";
+	import {
+		addDays, addWeeks, addMonths, getMondayOf, getWeekStart, getFirstOfMonth,
+		toDateStr, formatMonth, formatLongDate, formatShortDate, parseISO,
+		getLocaleWeekStart,
+	} from "./lib/types.ts";
+
+	import Toolbar from "./components/Toolbar.svelte";
+	import CalendarList from "./components/CalendarList.svelte";
+	import MonthView from "./components/MonthView.svelte";
+	import WeekView from "./components/WeekView.svelte";
+	import DayView from "./components/DayView.svelte";
+	import EventPopover from "./components/EventPopover.svelte";
+	import EventEditor from "./components/EventEditor.svelte";
+	import AccountSettings from "./components/AccountSettings.svelte";
+	import SyncStatus from "./components/SyncStatus.svelte";
+	import ImportPanel from "./components/ImportPanel.svelte";
+
+	// ── State ────────────────────────────────────────────────────────────────
+
+	let prefs = $state<CalendarPrefs>({ startOfWeek: getLocaleWeekStart(), defaultView: "week", dayStart: 7, dayEnd: 22, showWeekNumbers: false });
+
+	let viewMode = $state<ViewMode>("week");
+	let navDate = $state<Date>(new Date());
+	let displayTzid = $state<string>(Intl.DateTimeFormat().resolvedOptions().timeZone);
+
+	let instances = $state<EventInstance[]>([]);
+	let calendars = $state<CalendarView[]>([]);
+	let accounts = $state<AccountView[]>([]);
+
+	let showEditor = $state(false);
+	let editingInstance = $state<EventInstance | null>(null);
+	let editorDefaultCalendarId = $state<string>("");
+	let editorDefaultDate = $state<string>("");
+
+	let showPopover = $state(false);
+	let popoverInstance = $state<EventInstance | null>(null);
+	let popoverAnchor = $state<DOMRect | null>(null);
+
+	let showSettings = $state(false);
+	let showImport = $state(false);
+	let importIcsText = $state<string>("");
+
+	let syncProgress = $state<SyncProgress | null>(null);
+	let syncResult = $state<SyncResult | null>(null);
+	let isSyncing = $state(false);
+
+	let notification = $state<{ message: string; type: "success" | "error" } | null>(null);
+
+	// ── Derived: range for current view ─────────────────────────────────────
+
+	let rangeStart = $derived.by(() => {
+		if (viewMode === "day") return toDateStr(navDate);
+		if (viewMode === "week") return toDateStr(getWeekStart(navDate, prefs.startOfWeek));
+		// Month: start from the week-start on or before month start
+		const firstOfMonth = getFirstOfMonth(navDate.getFullYear(), navDate.getMonth());
+		return toDateStr(getWeekStart(firstOfMonth, prefs.startOfWeek));
+	});
+
+	let rangeEnd = $derived.by(() => {
+		if (viewMode === "day") return toDateStr(addDays(navDate, 1));
+		if (viewMode === "week") return toDateStr(addDays(getWeekStart(navDate, prefs.startOfWeek), 7));
+		// Month: 6 weeks
+		const firstOfMonth = getFirstOfMonth(navDate.getFullYear(), navDate.getMonth());
+		const gridStart = getWeekStart(firstOfMonth, prefs.startOfWeek);
+		return toDateStr(addDays(gridStart, 42));
+	});
+
+	// ── Load instances when range changes ────────────────────────────────────
+
+	let loadKey = $derived(`${rangeStart}|${rangeEnd}|${displayTzid}`);
+	$effect(() => {
+		// React to loadKey changes
+		loadKey;
+		loadInstances();
+	});
+
+	async function loadInstances() {
+		try {
+			const result = await rpc.request.getInstances({
+				startISO: rangeStart,
+				endISO: rangeEnd,
+				displayTzid,
+			});
+			instances = result ?? [];
+		} catch (e) {
+			console.error("[calendar] getInstances failed:", e);
+		}
+	}
+
+	async function loadCalendars() {
+		try {
+			calendars = (await rpc.request.getAllCalendars()) ?? [];
+		} catch {}
+	}
+
+	async function loadAccounts() {
+		try {
+			accounts = (await rpc.request.getAccounts()) ?? [];
+		} catch {}
+	}
+
+	// ── Navigation ───────────────────────────────────────────────────────────
+
+	function navigate(dir: -1 | 1) {
+		if (viewMode === "day") navDate = addDays(navDate, dir);
+		else if (viewMode === "week") navDate = addWeeks(navDate, dir);
+		else navDate = addMonths(navDate, dir);
+	}
+
+	function goToday() {
+		navDate = new Date();
+	}
+
+	// ── Event CRUD ───────────────────────────────────────────────────────────
+
+	function openNewEvent(defaultDate?: string) {
+		editingInstance = null;
+		editorDefaultDate = defaultDate ?? toDateStr(navDate);
+		editorDefaultCalendarId = getDefaultCalendarId();
+		showEditor = true;
+		closePopover();
+	}
+
+	function openEditEvent(instance: EventInstance) {
+		editingInstance = instance;
+		editorDefaultCalendarId = instance.calendarId;
+		showEditor = true;
+		closePopover();
+	}
+
+	async function handleSaveEvent(input: EventInput, scope: RecurringEditScope, instanceStartISO?: string) {
+		try {
+			if (editingInstance) {
+				await rpc.request.updateEvent({
+					uid: editingInstance.uid,
+					input,
+					scope,
+					instanceStartISO,
+				});
+				showNotification("Event updated");
+			} else {
+				await rpc.request.createEvent({ input });
+				showNotification("Event created");
+			}
+			showEditor = false;
+			await loadInstances();
+		} catch (e) {
+			showNotification(e instanceof Error ? e.message : "Failed to save event", "error");
+		}
+	}
+
+	async function handleDeleteEvent(uid: string, scope: RecurringEditScope, instanceStartISO?: string) {
+		try {
+			await rpc.request.deleteEvent({ uid, scope, instanceStartISO });
+			showNotification("Event deleted");
+			showEditor = false;
+			closePopover();
+			await loadInstances();
+		} catch (e) {
+			showNotification(e instanceof Error ? e.message : "Failed to delete event", "error");
+		}
+	}
+
+	async function handleReschedule(uid: string, instanceStartISO: string, newStartISO: string) {
+		try {
+			await rpc.request.rescheduleEvent({ uid, instanceStartISO, newStartISO, scope: "this" });
+			await loadInstances();
+		} catch (e) {
+			showNotification(e instanceof Error ? e.message : "Failed to reschedule event", "error");
+			await loadInstances(); // reload to restore original position
+		}
+	}
+
+	// ── Popover ──────────────────────────────────────────────────────────────
+
+	function openPopover(instance: EventInstance, anchor: DOMRect) {
+		popoverInstance = instance;
+		popoverAnchor = anchor;
+		showPopover = true;
+	}
+
+	function closePopover() {
+		showPopover = false;
+		popoverInstance = null;
+		popoverAnchor = null;
+	}
+
+	// ── Sync ─────────────────────────────────────────────────────────────────
+
+	async function triggerSync() {
+		isSyncing = true;
+		try {
+			await rpc.request.triggerSync();
+		} catch {}
+	}
+
+	// ── Calendar toggles ─────────────────────────────────────────────────────
+
+	async function handleCalendarToggle(calendarId: string, enabled: boolean) {
+		const cal = calendars.find((c) => c.id === calendarId);
+		if (!cal) return;
+		try {
+			await rpc.request.setCalendarEnabled({ accountId: cal.accountId, calendarId, enabled });
+			calendars = calendars.map((c) => (c.id === calendarId ? { ...c, enabled } : c));
+			await loadInstances();
+		} catch {}
+	}
+
+	// ── Import ───────────────────────────────────────────────────────────────
+
+	async function handleImport(icsText: string, calendarId: string) {
+		const defaultCal = getDefaultCalendarId();
+		const targetCalendar = calendarId || defaultCal;
+		if (!targetCalendar) return;
+		const accountId = calendars.find((c) => c.id === targetCalendar)?.accountId ?? "";
+		try {
+			const result = await rpc.request.importIcs({ icsText, calendarId: targetCalendar, accountId });
+			showNotification(`Imported ${result.imported} event(s)`);
+			showImport = false;
+			await loadInstances();
+		} catch (e) {
+			showNotification(e instanceof Error ? e.message : "Import failed", "error");
+		}
+	}
+
+	// ── Helpers ──────────────────────────────────────────────────────────────
+
+	function getDefaultCalendarId(): string {
+		const enabledCals = calendars.filter((c) => c.enabled);
+		return enabledCals[0]?.id ?? "";
+	}
+
+	function showNotification(message: string, type: "success" | "error" = "success") {
+		notification = { message, type };
+		setTimeout(() => { notification = null; }, 3000);
+	}
+
+	// ── RPC message listeners ─────────────────────────────────────────────────
+
+	rpc.addMessageListener("syncProgress", (p: SyncProgress) => {
+		syncProgress = p;
+		isSyncing = p.phase !== "done";
+	});
+
+	rpc.addMessageListener("syncComplete", (r: SyncResult) => {
+		syncResult = r;
+		isSyncing = false;
+		syncProgress = null;
+		loadInstances();
+		if (r.errors.length > 0) {
+			showNotification(`Sync complete with ${r.errors.length} error(s)`, "error");
+		}
+	});
+
+	rpc.addMessageListener("eventChanged", async () => {
+		await loadInstances();
+	});
+
+	rpc.addMessageListener("openImport", ({ icsText }: { icsText: string }) => {
+		importIcsText = icsText;
+		showImport = true;
+	});
+
+	// ── Init ──────────────────────────────────────────────────────────────────
+
+	onMount(async () => {
+		await Promise.all([loadCalendars(), loadAccounts()]);
+		const [tz, loadedPrefs] = await Promise.all([
+			rpc.request.getDisplayTimezone(),
+			rpc.request.getCalendarPrefs(),
+		]);
+		displayTzid = tz;
+		prefs = {
+			...loadedPrefs,
+			// Resolve "locale" sentinel to the actual browser locale value
+			startOfWeek: loadedPrefs.startOfWeek === "locale" ? getLocaleWeekStart() : loadedPrefs.startOfWeek,
+		};
+		viewMode = loadedPrefs.defaultView;
+		// Trigger startup sync now that we know the RPC connection is live
+		triggerSync();
+	});
 </script>
 
-<AppShell>
-	{#snippet header()}
-		<div class="flex items-center gap-3 px-4 py-3">
-			<h1 class="text-base font-semibold">Calendar</h1>
-		</div>
-	{/snippet}
+<!-- Root: h-screen flex-col, same pattern as contacts app. SyncStatus always at bottom. -->
+<div class="preset-filled-surface-50-950 flex h-screen flex-col overflow-hidden">
+	<!-- Toolbar -->
+	<header class="border-b border-surface-200-800 shrink-0">
+		<Toolbar
+			{viewMode}
+			{navDate}
+			{displayTzid}
+			{isSyncing}
+			onViewChange={(v) => { viewMode = v; }}
+			onNavigate={(dir) => navigate(dir)}
+			onToday={goToday}
+			onTzChange={async (tz) => {
+				displayTzid = tz;
+				await rpc.request.setDisplayTimezone({ tzid: tz });
+			}}
+			onNewEvent={() => openNewEvent()}
+			onSync={triggerSync}
+			onSettings={() => { showSettings = true; }}
+		/>
+	</header>
 
-	<div class="p-4">
-		<p class="text-sm text-surface-600-400">Calendar — coming soon.</p>
+	<!-- Main row: sidebar + view area -->
+	<div class="flex flex-1 overflow-hidden">
+		<!-- Sidebar: flex-col so CalendarList can pin Account Settings button at bottom -->
+		<aside class="shrink-0 border-r border-surface-200-800 flex flex-col overflow-hidden">
+			<CalendarList
+				{calendars}
+				{accounts}
+				onToggle={handleCalendarToggle}
+				onSettingsClick={() => { showSettings = true; }}
+			/>
+		</aside>
+
+		<!-- Calendar view area: flex-col, views fill this with flex-1 -->
+		<div class="flex-1 flex flex-col overflow-hidden">
+			{#if viewMode === "month"}
+				<MonthView
+					{instances}
+					{navDate}
+					{calendars}
+					startOfWeek={prefs.startOfWeek}
+					showWeekNumbers={prefs.showWeekNumbers}
+					onEventClick={openPopover}
+					onDayClick={(date) => openNewEvent(date)}
+					onDrop={async (instanceId, newDate) => {
+						const inst = instances.find((i) => i.instanceId === instanceId);
+						if (!inst) return;
+						const origStart = inst.startISO;
+						const newISO = newDate + origStart.slice(10);
+						await handleReschedule(inst.uid, origStart, newISO);
+					}}
+				/>
+			{:else if viewMode === "week"}
+				<WeekView
+					{instances}
+					{navDate}
+					{displayTzid}
+					startOfWeek={prefs.startOfWeek}
+					dayStart={prefs.dayStart}
+					dayEnd={prefs.dayEnd}
+					showWeekNumbers={prefs.showWeekNumbers}
+					onEventClick={openPopover}
+					onSlotClick={(dateISO) => openNewEvent(dateISO.slice(0, 10))}
+					onDrop={handleReschedule}
+				/>
+			{:else}
+				<DayView
+					{instances}
+					{navDate}
+					{displayTzid}
+					dayStart={prefs.dayStart}
+					dayEnd={prefs.dayEnd}
+					showWeekNumbers={prefs.showWeekNumbers}
+					onEventClick={openPopover}
+					onSlotClick={(dateISO) => openNewEvent(dateISO.slice(0, 10))}
+					onDrop={handleReschedule}
+				/>
+			{/if}
+		</div>
 	</div>
-</AppShell>
+
+	<!-- Status bar: direct child of h-screen flex-col, always pinned at bottom -->
+	<SyncStatus {syncProgress} {syncResult} {isSyncing} />
+</div>
+
+<!-- Overlays -->
+{#if showPopover && popoverInstance && popoverAnchor}
+	<EventPopover
+		instance={popoverInstance}
+		anchor={popoverAnchor}
+		onEdit={() => openEditEvent(popoverInstance!)}
+		onDelete={(scope, instanceStartISO) => handleDeleteEvent(popoverInstance!.uid, scope, instanceStartISO)}
+		onClose={closePopover}
+	/>
+{/if}
+
+{#if showEditor}
+	<EventEditor
+		instance={editingInstance}
+		defaultCalendarId={editorDefaultCalendarId}
+		defaultDate={editorDefaultDate}
+		{calendars}
+		{displayTzid}
+		onSave={handleSaveEvent}
+		onCancel={() => { showEditor = false; }}
+		onDelete={(scope, instanceStartISO) => handleDeleteEvent(editingInstance!.uid, scope, instanceStartISO)}
+	/>
+{/if}
+
+{#if showSettings}
+	<AccountSettings
+		{accounts}
+		{calendars}
+		{prefs}
+		onPrefChange={(updated) => { prefs = updated; }}
+		onAccountsChange={(updatedAccounts, updatedCalendars) => {
+			accounts = updatedAccounts;
+			calendars = updatedCalendars;
+		}}
+		onClose={async () => {
+			showSettings = false;
+			await Promise.all([loadCalendars(), loadAccounts()]);
+		}}
+	/>
+{/if}
+
+{#if showImport}
+	<ImportPanel
+		icsText={importIcsText}
+		{calendars}
+		onImport={handleImport}
+		onClose={() => { showImport = false; }}
+	/>
+{/if}
+
+<!-- Notification banner -->
+{#if notification}
+	<div
+		class="fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm font-medium shadow-lg
+			{notification.type === 'error'
+				? 'bg-error-500 text-white'
+				: 'bg-success-500 text-white'}"
+	>
+		{notification.message}
+	</div>
+{/if}

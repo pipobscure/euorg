@@ -9,6 +9,11 @@
 	},
 	"dependencies": {
 		"@euorg/shared": "workspace:*",
-		"electrobun": "1.13.1"
+		"@js-temporal/polyfill": "^0.5.1",
+		"electrobun": "1.13.1",
+		"nodemailer": "^8.0.1"
+	},
+	"devDependencies": {
+		"@types/nodemailer": "^7.0.11"
 	}
 }
