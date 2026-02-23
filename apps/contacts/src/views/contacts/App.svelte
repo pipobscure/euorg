@@ -52,6 +52,14 @@
 	// Derived: ContactRow for the currently selected contact
 	let selectedRow = $derived(contacts.find((c) => c.uid === selectedUid) ?? null);
 
+	// Delete confirmation
+	let deleteConfirmUid = $state<string | null>(null);
+	let deleteConfirmRow = $derived(contacts.find((c) => c.uid === deleteConfirmUid) ?? null);
+
+	function requestDeleteContact(uid: string) {
+		deleteConfirmUid = uid;
+	}
+
 	// ── Load ───────────────────────────────────────────────────────────────────
 	async function loadContacts() {
 		const rows = await rpc.request.getContacts();
@@ -148,11 +156,12 @@
 	// ── Keyboard shortcuts ────────────────────────────────────────────────────
 	function handleKeydown(e: KeyboardEvent) {
 		const inInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
-		const anyModalOpen = showEditor || showAccountSettings || showImport || showDuplicatePanel;
+		const anyModalOpen = showEditor || showAccountSettings || showImport || showDuplicatePanel || deleteConfirmUid !== null;
 
 		// Escape: close overlays in priority order (works even inside modals, which add their own handlers)
 		if (e.key === "Escape" && !e.ctrlKey) {
 			if (contextMenu) { contextMenu = null; return; }
+			if (deleteConfirmUid !== null) { deleteConfirmUid = null; return; }
 			// Other modals handle their own Escape via svelte:window
 			return;
 		}
@@ -160,6 +169,14 @@
 		// Ctrl shortcuts
 		if (e.ctrlKey || e.metaKey) {
 			if (anyModalOpen) return;
+			// Ctrl+F: focus search regardless of whether an input is focused
+			if (e.key === "f") {
+				e.preventDefault();
+				const el = document.getElementById("contact-search") as HTMLInputElement | null;
+				el?.focus();
+				el?.select();
+				return;
+			}
 			if (inInput) return;
 			switch (e.key) {
 				case "n": e.preventDefault(); openNewContact(); break;
@@ -169,10 +186,13 @@
 			return;
 		}
 
-		// Plain keys: only when no modal open and not in an input
-		if (anyModalOpen || inInput) return;
+		if (anyModalOpen) return;
 
+		const inSearchInput = (e.target as HTMLElement)?.id === "contact-search";
+
+		// Arrow keys navigate the contact list even when the search/filter input is focused
 		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			if (inInput && !inSearchInput) return;
 			if (contacts.length === 0) return;
 			e.preventDefault();
 			const idx = contacts.findIndex((c) => c.uid === selectedUid);
@@ -183,11 +203,15 @@
 				const prev = idx === -1 ? contacts.length - 1 : Math.max(idx - 1, 0);
 				selectContact(contacts[prev].uid);
 			}
+			return;
 		}
+
+		// Other plain-key shortcuts require focus to be outside any input
+		if (inInput) return;
 
 		if (e.key === "Delete" && selectedUid) {
 			e.preventDefault();
-			deleteContactByUid(selectedUid);
+			requestDeleteContact(selectedUid);
 		}
 	}
 
@@ -276,7 +300,7 @@
 			{ label: "Find Duplicates…", action: openDuplicatePanel },
 			{ label: "Account Settings", action: () => (showAccountSettings = true) },
 			{ separator: true },
-			{ label: "Delete", danger: true, action: () => deleteContactByUid(uid) },
+			{ label: "Delete", danger: true, action: () => requestDeleteContact(uid) },
 		];
 		contextMenu = { x, y, items };
 	}
@@ -458,4 +482,36 @@
 		items={contextMenu.items}
 		onClose={closeContextMenu}
 	/>
+{/if}
+
+{#if deleteConfirmUid !== null}
+	<!-- Delete confirmation dialog -->
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+		role="dialog"
+		aria-modal="true"
+		onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); deleteConfirmUid = null; } }}
+	>
+		<div class="bg-surface-50 dark:bg-surface-900 border border-surface-200-800 rounded-xl shadow-xl p-6 w-80 flex flex-col gap-4">
+			<p class="text-surface-900-100 text-sm">
+				Delete <span class="font-semibold">{deleteConfirmRow?.displayName ?? "this contact"}</span>?
+			</p>
+			<p class="text-surface-500-400 text-xs">This action cannot be undone.</p>
+			<div class="flex gap-2 justify-end">
+				<button
+					class="btn preset-tonal text-sm"
+					onclick={() => (deleteConfirmUid = null)}
+				>Cancel</button>
+				<button
+					class="btn preset-filled-error-500 text-sm"
+					onclick={async () => {
+						const uid = deleteConfirmUid!;
+						deleteConfirmUid = null;
+						await deleteContactByUid(uid);
+					}}
+				>Delete</button>
+			</div>
+		</div>
+	</div>
 {/if}

@@ -51,6 +51,7 @@
 		<div class="relative">
 			<span class="text-surface-400 pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm">🔍</span>
 			<input
+				id="contact-search"
 				class="input w-full pl-8 text-sm"
 				type="search"
 				placeholder="Search contacts…"
