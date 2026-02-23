@@ -48,15 +48,21 @@
 	let tzInput = $state(displayTzid);
 	let tzOpen = $state(false);
 
+	/** Convert a timezone ID to a human-readable display name.
+	 *  e.g. "America/New_York" → "America / New York" */
+	function tzIdToDisplay(tz: string): string {
+		return tz.replace(/_/g, " ").replace(/\//g, " / ");
+	}
+
 	// Keep input in sync with prop when dropdown is closed
 	$effect(() => {
-		if (!tzOpen) tzInput = displayTzid;
+		if (!tzOpen) tzInput = tzIdToDisplay(displayTzid);
 	});
 
 	const filteredTzList = $derived(
 		tzInput === ""
 			? allTimezones
-			: allTimezones.filter((tz) => tz.toLowerCase().includes(tzInput.toLowerCase())),
+			: allTimezones.filter((tz) => tzIdToDisplay(tz).toLowerCase().includes(tzInput.toLowerCase())),
 	);
 
 	function onTzFocus() {
@@ -71,7 +77,7 @@
 
 	function selectTz(tz: string) {
 		onTzChange(tz);
-		tzInput = tz;
+		tzInput = tzIdToDisplay(tz);
 		tzOpen = false;
 	}
 </script>
@@ -143,7 +149,7 @@
 		<div class="relative">
 			<input
 				type="text"
-				value={tzOpen ? tzInput : displayTzid}
+				value={tzOpen ? tzInput : tzIdToDisplay(displayTzid)}
 				oninput={(e) => { tzInput = (e.target as HTMLInputElement).value; }}
 				onfocus={onTzFocus}
 				onblur={onTzBlur}
@@ -158,7 +164,7 @@
 							class="block w-full px-3 py-1 text-left text-xs hover:bg-surface-100-900
 								{tz === displayTzid ? 'text-primary-500 font-semibold' : ''}"
 							onmousedown={() => selectTz(tz)}
-						>{tz}</button>
+						>{tzIdToDisplay(tz)}</button>
 					{:else}
 						<div class="px-3 py-2 text-xs text-surface-400-600">No results</div>
 					{/each}
