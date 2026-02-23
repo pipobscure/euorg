@@ -42,6 +42,7 @@ import { writeICS, readICS } from "./db.ts";
 import {
 	parseICS,
 	serializeICS,
+	getVTimezone,
 	generateUID,
 	type ICalEvent,
 	type VEventInput,
@@ -163,9 +164,12 @@ async function syncCalendar(
 		for (const { href, etag, ics } of items) {
 			processed.add(href);
 			const localEtag = localEtags.get(href);
-			if (localEtag === etag) continue; // already up to date
 			try {
 				const parsed = parseICS(ics);
+				// Clean up stale rows for this href whose UIDs are no longer present in the ICS.
+				// This handles parser-bug migrations (e.g. VALARM-UID stored as event UID).
+				db.cleanupStaleHrefRows(href, parsed.events.map((e) => e.uid));
+				if (localEtag === etag) continue; // already up to date
 				for (const event of parsed.events) {
 					const path = writeICS(event.uid, event.recurrenceId, ics);
 					db.upsertEvent(event, calendar.id, account.id, href, etag, path);
@@ -244,6 +248,7 @@ async function syncCalendar(
 		try {
 			const { ics, etag } = await fetchEvent(href, account.serverUrl, c);
 			const parsed = parseICS(ics);
+			db.cleanupStaleHrefRows(href, parsed.events.map((e) => e.uid));
 			for (const event of parsed.events) {
 				const path = writeICS(event.uid, event.recurrenceId, ics);
 				db.upsertEvent(event, calendar.id, account.id, href, etag, path);
@@ -277,6 +282,94 @@ async function syncCalendar(
 // ── Write Operations ──────────────────────────────────────────────────────────
 
 /**
+ * Extract all VEVENT blocks from an ICS string.
+ */
+function extractVEvents(ics: string): string[] {
+	const result: string[] = [];
+	const re = /BEGIN:VEVENT[\r\n][\s\S]*?END:VEVENT/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(ics)) !== null) result.push(m[0]);
+	return result;
+}
+
+/**
+ * Inject an additional VEVENT block into a VCALENDAR string, before END:VCALENDAR.
+ */
+function injectVEventIntoICS(calICS: string, veventBlock: string): string {
+	const endIdx = calICS.lastIndexOf("END:VCALENDAR");
+	if (endIdx === -1) return calICS;
+	const block = veventBlock.endsWith("\r\n") ? veventBlock : veventBlock + "\r\n";
+	return calICS.slice(0, endIdx) + block + calICS.slice(endIdx);
+}
+
+/**
+ * Derive the standard CalDAV href for an event: {calendarPath}/{uid}.ics
+ * Used as a fallback when the server's no-uid-conflict error omits the conflicting href.
+ */
+function canonicalEventHref(calendarUrl: string, uid: string): string {
+	const path = calendarUrl.includes("://") ? new URL(calendarUrl).pathname : calendarUrl;
+	return path.replace(/\/$/, "") + "/" + encodeURIComponent(uid) + ".ics";
+}
+
+/**
+ * Attempt a CalDAV PUT with automatic conflict resolution (up to 3 attempts):
+ *
+ * - CONFLICT (412): ETag is stale — fetch the server's current ICS from the
+ *   same href, apply `buildMerged` to re-derive the desired ICS, retry.
+ *
+ * - UIDCONFLICT (409/403 no-uid-conflict): our DB has a stale/wrong href for
+ *   this UID. If the server's error body contains the correct href we use it;
+ *   otherwise we fall back to `canonicalHref` (calendarPath/{uid}.ics).
+ *
+ * Returns the final { etag, ics, href } so the DB can be updated with any
+ * corrected href.
+ */
+async function updateWithRetry(
+	href: string,
+	baseUrl: string,
+	ics: string,
+	etag: string,
+	c: CalDAVCredentials,
+	buildMerged: (serverICS: string) => string,
+	canonicalHref?: string,
+): Promise<{ etag: string; ics: string; href: string }> {
+	let targetHref = href;
+	let targetEtag = etag;
+	let targetICS = ics;
+
+	for (let attempt = 0; attempt < 3; attempt++) {
+		console.log(`[updateWithRetry] attempt ${attempt} PUT → ${targetHref}`);
+		try {
+			const newEtag = await caldavUpdate(targetHref, baseUrl, targetICS, targetEtag, c);
+			console.log(`[updateWithRetry] success, newEtag=${newEtag}`);
+			return { etag: newEtag, ics: targetICS, href: targetHref };
+		} catch (err) {
+			if (!(err instanceof Error)) throw err;
+			console.log(`[updateWithRetry] attempt ${attempt} error: ${err.message.slice(0, 200)}`);
+			if (err.message.startsWith("CONFLICT:")) {
+				// 412: ETag is stale — fetch current version from the same href
+				const { ics: serverICS, etag: serverEtag } = await fetchEvent(targetHref, baseUrl, c);
+				targetEtag = serverEtag;
+				targetICS = buildMerged(serverICS);
+			} else if (err.message.startsWith("UIDCONFLICT:")) {
+				// UID exists at a different href — use server-supplied href or fall back to canonical
+				const serverHref = err.message.slice("UIDCONFLICT:".length);
+				const resolvedHref = serverHref || canonicalHref;
+				console.log(`[updateWithRetry] UIDCONFLICT serverHref=${serverHref || "(empty)"} canonical=${canonicalHref} resolved=${resolvedHref}`);
+				if (!resolvedHref) throw err;
+				const { ics: serverICS, etag: serverEtag } = await fetchEvent(resolvedHref, baseUrl, c);
+				targetHref = resolvedHref;
+				targetEtag = serverEtag;
+				targetICS = buildMerged(serverICS);
+			} else {
+				throw err;
+			}
+		}
+	}
+	throw new Error("Failed to save event after multiple retries");
+}
+
+/**
  * Create a new event on the CalDAV server and in the local DB.
  * Returns the new UID.
  */
@@ -293,7 +386,8 @@ export async function writeCreate(
 	if (!calendar) throw new Error(`Calendar ${calendarId} not found`);
 
 	const uid = generateUID();
-	const icsText = serializeICS({ ...input, uid });
+	const vtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
+	const icsText = serializeICS({ ...input, uid }, vtimezone);
 	const { href, etag } = await caldavCreate(calendar.url, uid, icsText, creds(account));
 
 	const parsed = parseICS(icsText);
@@ -329,57 +423,99 @@ export async function writeUpdate(
 	const calendar = account.caldav?.calendars.find((c) => c.id === row.calendarId);
 	if (!calendar) throw new Error(`Calendar ${row.calendarId} not found`);
 	const c = creds(account);
+	console.log(`[writeUpdate] uid=${uid} scope=${scope} rrule=${row.rrule || "(none)"} href=${row.href}`);
 
 	if (scope === "all" || !row.rrule) {
 		// Replace master ICS
-		const newICS = serializeICS({ ...input, uid, sequence: getSequence(row.icsPath, uid) + 1 });
-		const newEtag = await caldavUpdate(row.href, account.serverUrl, newICS, row.etag ?? "", c);
-		const parsed = parseICS(newICS);
+		const vtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
+		const newICS = serializeICS({ ...input, uid, sequence: getSequence(row.icsPath, uid) + 1 }, vtimezone);
+		const { etag: newEtag, ics: finalICS, href: finalHref } = await updateWithRetry(
+			row.href, account.serverUrl, newICS, row.etag ?? "", c,
+			(serverICS) => {
+				const serverMaster = parseICS(serverICS).events.find((e) => e.uid === uid && !e.recurrenceId);
+				return serializeICS({ ...input, uid, sequence: (serverMaster?.sequence ?? 0) + 1 }, vtimezone);
+			},
+			canonicalEventHref(calendar.url, uid),
+		);
+		const parsed = parseICS(finalICS);
 		const event = parsed.events[0];
 		if (event) {
-			const path = writeICS(uid, null, newICS);
-			db.upsertEvent(event, row.calendarId, row.accountId, row.href, newEtag, path);
+			const path = writeICS(uid, null, finalICS);
+			db.upsertEvent(event, row.calendarId, row.accountId, finalHref, newEtag, path);
 		}
 	} else if (scope === "this" && instanceStartISO) {
 		// Read master ICS
 		const masterICS = readICS(row.icsPath);
 		if (!masterICS) throw new Error("Cannot read master ICS");
 		const masterParsed = parseICS(masterICS);
-		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId);
+		// Fallback to any non-override event if UID mismatches (e.g. stale DB uid from VALARM-UID parsing bug)
+		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId)
+			?? masterParsed.events.find((e) => !e.recurrenceId);
 		if (!master) throw new Error("Master event not found in ICS");
 
-		// Add EXDATE for this instance
-		const exdateVal = isoToICalDateTime(instanceStartISO, master.dtstartTzid);
-		const newExdates = [...master.exdate, exdateVal];
-		const updatedMasterICS = rebuildMasterWithExdate(masterICS, uid, newExdates);
-		const newMasterEtag = await caldavUpdate(
-			row.href, account.serverUrl, updatedMasterICS, row.etag ?? "", c,
-		);
-		const masterPath = writeICS(uid, null, updatedMasterICS);
-		const masterEvent = parseICS(updatedMasterICS).events[0];
-		if (masterEvent) {
-			db.upsertEvent(masterEvent, row.calendarId, row.accountId, row.href, newMasterEtag, masterPath);
-		}
+		// All-day events use DATE format; timed events use DATETIME (RFC 5545 §3.8.4.4)
+		const recurrenceId = master.dtstartIsDate
+			? isoToICalDate(instanceStartISO)
+			: isoToICalDateTime(instanceStartISO, master.dtstartTzid);
+		const ovVtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
 
-		// Create override VEVENT with RECURRENCE-ID
-		const recurrenceId = exdateVal;
-		const overrideICS = serializeICS({
-			...input,
-			uid,
-			sequence: (master.sequence ?? 0) + 1,
-			method: undefined,
-		}, recurrenceId);
-		const overrideHref = `${calendar.url.replace(/\/$/, "")}/${encodeURIComponent(uid)}_${encodeURIComponent(recurrenceId)}.ics`;
-		// PUT override as a new resource
-		const { href: ovHref, etag: ovEtag } = await caldavCreate(
-			calendar.url, `${uid}_${recurrenceId}`, overrideICS, c,
+		// RFC 4791: master + overrides MUST live in the same calendar object resource.
+		// Build a combined ICS (master with EXDATE + override VEVENT) and PUT it once.
+		// Always derive the master UID from the base ICS — the DB uid may differ if the event
+		// was previously stored with a VALARM uid (now fixed in the parser).
+		const buildCombined = (baseICS: string) => {
+			const baseParsed = parseICS(baseICS);
+			const baseMaster = baseParsed.events.find((e) => !e.recurrenceId);
+			const effectiveUID = baseMaster?.uid ?? uid;
+
+			// Build override VEVENT with the master's actual UID
+			const freshOverrideICS = serializeICS({
+				...input,
+				uid: effectiveUID,
+				recurrenceId,
+				sequence: (baseMaster?.sequence ?? 0) + 1,
+				method: undefined,
+				// RECURRENCE-ID overrides must not have RRULE/EXDATE (RFC 5545 §3.8.5.3)
+				rrule: undefined,
+				exdate: undefined,
+			}, ovVtimezone);
+			const [freshOverrideVEvent] = extractVEvents(freshOverrideICS);
+			if (!freshOverrideVEvent) throw new Error("Failed to build override VEVENT");
+
+			// Preserve existing EXDATEs but REMOVE the override date — per RFC 5545 §3.8.5.3,
+			// RECURRENCE-ID must coincide with an occurrence in the recurrence set. EXDATE removes
+			// dates from the set, so EXDATE + RECURRENCE-ID for the same date is invalid.
+			// The override VEVENT itself handles that occurrence; EXDATE is only for deletions.
+			const effectiveExdates = (baseMaster?.exdate ?? []).filter((ex) => ex !== recurrenceId);
+
+			// Strip any stale override VEVENTs for this recurrence date (leftover from old code)
+			const stripped = stripOverrideVEvents(baseICS, recurrenceId);
+			// Update master EXDATEs using the master's actual UID
+			const withExdate = rebuildMasterWithExdate(stripped, effectiveUID, effectiveExdates);
+			return injectVEventIntoICS(withExdate, freshOverrideVEvent);
+		};
+		const combinedICS = buildCombined(masterICS);
+
+		const { etag: newEtag, ics: finalICS, href: finalHref } = await updateWithRetry(
+			row.href, account.serverUrl, combinedICS, row.etag ?? "", c,
+			(serverICS) => buildCombined(serverICS),
+			canonicalEventHref(calendar.url, uid),
 		);
-		const overrideEvent = parseICS(overrideICS).events[0];
-		if (overrideEvent) {
-			// Manually set recurrenceId
-			overrideEvent.recurrenceId = recurrenceId;
-			const ovPath = writeICS(uid, recurrenceId, overrideICS);
-			db.upsertEvent(overrideEvent, row.calendarId, row.accountId, ovHref, ovEtag, ovPath);
+
+		// Store the combined ICS; both master and override point to same file/href.
+		// Find events by role (master vs override) rather than by uid — effective uid in the
+		// server ICS may differ from the DB uid after the VALARM-uid bug fix.
+		const combinedPath = writeICS(uid, null, finalICS);
+		const finalEvents = parseICS(finalICS).events;
+		const finalMaster = finalEvents.find((e) => !e.recurrenceId);
+		const finalOverride = finalEvents.find((e) => e.recurrenceId === recurrenceId);
+		if (finalMaster) {
+			// Clean up the stale DB row if the effective UID changed
+			if (finalMaster.uid !== uid) db.deleteEvent(uid);
+			db.upsertEvent(finalMaster, row.calendarId, row.accountId, finalHref, newEtag, combinedPath);
+		}
+		if (finalOverride) {
+			db.upsertEvent(finalOverride, row.calendarId, row.accountId, finalHref, newEtag, combinedPath);
 		}
 	} else if (scope === "thisAndFollowing" && instanceStartISO) {
 		// Truncate master: add UNTIL to RRULE (day before instanceStart)
@@ -392,11 +528,15 @@ export async function writeUpdate(
 		const untilStr = isoToICalDate(subtractOneDay(instanceStartISO));
 		const truncatedRRule = addUntilToRRule(master.rrule ?? "", untilStr);
 		const truncatedICS = rebuildMasterWithRRule(masterICS, uid, truncatedRRule);
-		const truncEtag = await caldavUpdate(row.href, account.serverUrl, truncatedICS, row.etag ?? "", c);
-		const truncPath = writeICS(uid, null, truncatedICS);
-		const truncEvent = parseICS(truncatedICS).events[0];
+		const { etag: truncEtag, ics: finalTruncICS, href: finalTruncHref } = await updateWithRetry(
+			row.href, account.serverUrl, truncatedICS, row.etag ?? "", c,
+			(serverICS) => rebuildMasterWithRRule(serverICS, uid, truncatedRRule),
+			canonicalEventHref(calendar.url, uid),
+		);
+		const truncPath = writeICS(uid, null, finalTruncICS);
+		const truncEvent = parseICS(finalTruncICS).events[0];
 		if (truncEvent) {
-			db.upsertEvent(truncEvent, row.calendarId, row.accountId, row.href, truncEtag, truncPath);
+			db.upsertEvent(truncEvent, row.calendarId, row.accountId, finalTruncHref, truncEtag, truncPath);
 		}
 		// Delete local overrides from instanceStart onwards (convert to UTC for dtstart_utc comparison)
 		db.deleteEventsFromDate(uid, new Date(instanceStartISO).toISOString().replace(/\.\d{3}Z$/, "Z"));
@@ -422,6 +562,7 @@ export async function writeDelete(
 
 	const account = cfg.accounts.find((a) => a.id === row.accountId);
 	if (!account) throw new Error(`Account ${row.accountId} not found`);
+	const calendar = account.caldav?.calendars.find((ca) => ca.id === row.calendarId);
 	const c = creds(account);
 
 	if (scope === "all" || !row.rrule) {
@@ -434,20 +575,23 @@ export async function writeDelete(
 		const masterParsed = parseICS(masterICS);
 		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId);
 		if (!master) throw new Error("Master event not found");
-		const exdateVal = isoToICalDateTime(instanceStartISO, master.dtstartTzid);
+		const exdateVal = master.dtstartIsDate
+			? isoToICalDate(instanceStartISO)
+			: isoToICalDateTime(instanceStartISO, master.dtstartTzid);
 		const newExdates = [...master.exdate, exdateVal];
 		const updatedMasterICS = rebuildMasterWithExdate(masterICS, uid, newExdates);
-		const newEtag = await caldavUpdate(row.href, account.serverUrl, updatedMasterICS, row.etag ?? "", c);
-		const masterPath = writeICS(uid, null, updatedMasterICS);
-		const masterEvent = parseICS(updatedMasterICS).events[0];
+		const { etag: newEtag, ics: finalMasterICS, href: finalMasterHref } = await updateWithRetry(
+			row.href, account.serverUrl, updatedMasterICS, row.etag ?? "", c,
+			(serverICS) => rebuildMasterWithExdate(serverICS, uid, newExdates),
+			calendar ? canonicalEventHref(calendar.url, uid) : undefined,
+		);
+		const masterPath = writeICS(uid, null, finalMasterICS);
+		const masterEvent = parseICS(finalMasterICS).events[0];
 		if (masterEvent) {
-			db.upsertEvent(masterEvent, row.calendarId, row.accountId, row.href, newEtag, masterPath);
+			db.upsertEvent(masterEvent, row.calendarId, row.accountId, finalMasterHref, newEtag, masterPath);
 		}
-		// Also delete override row if it exists
-		if (instanceStartISO) {
-			const ridKey = isoToICalDateTime(instanceStartISO, master.dtstartTzid);
-			db.deleteOverride(uid, ridKey);
-		}
+		// Delete any override row from DB
+		db.deleteOverride(uid, exdateVal);
 	} else if (scope === "thisAndFollowing" && instanceStartISO) {
 		const masterICS = readICS(row.icsPath);
 		if (!masterICS) throw new Error("Cannot read master ICS");
@@ -458,11 +602,15 @@ export async function writeDelete(
 		const untilStr = isoToICalDate(subtractOneDay(instanceStartISO));
 		const truncatedRRule = addUntilToRRule(master.rrule ?? "", untilStr);
 		const truncatedICS = rebuildMasterWithRRule(masterICS, uid, truncatedRRule);
-		const truncEtag = await caldavUpdate(row.href, account.serverUrl, truncatedICS, row.etag ?? "", c);
-		const truncPath = writeICS(uid, null, truncatedICS);
-		const truncEvent = parseICS(truncatedICS).events[0];
+		const { etag: truncEtag, ics: finalTruncICS, href: finalTruncHref } = await updateWithRetry(
+			row.href, account.serverUrl, truncatedICS, row.etag ?? "", c,
+			(serverICS) => rebuildMasterWithRRule(serverICS, uid, truncatedRRule),
+			calendar ? canonicalEventHref(calendar.url, uid) : undefined,
+		);
+		const truncPath = writeICS(uid, null, finalTruncICS);
+		const truncEvent = parseICS(finalTruncICS).events[0];
 		if (truncEvent) {
-			db.upsertEvent(truncEvent, row.calendarId, row.accountId, row.href, truncEtag, truncPath);
+			db.upsertEvent(truncEvent, row.calendarId, row.accountId, finalTruncHref, truncEtag, truncPath);
 		}
 		// Delete local instances from instanceStart onwards (convert to UTC for dtstart_utc comparison)
 		db.deleteEventsFromDate(uid, new Date(instanceStartISO).toISOString().replace(/\.\d{3}Z$/, "Z"));
@@ -501,6 +649,7 @@ export async function writeReschedule(
 		summary: ev.summary,
 		description: ev.description,
 		location: ev.location,
+		url: ev.url,
 		startISO: newStartISO,
 		endISO: newEndISO,
 		isAllDay: ev.dtstartIsDate,
@@ -522,6 +671,35 @@ function getSequence(icsPath: string, uid: string): number {
 	return parsed.events.find((e) => e.uid === uid)?.sequence ?? 0;
 }
 
+/** Remove VEVENT blocks that have a specific RECURRENCE-ID value (stale overrides) */
+function stripOverrideVEvents(icsText: string, recurrenceId: string): string {
+	const lines = icsText.replace(/\r\n/g, "\n").split("\n");
+	const result: string[] = [];
+	let inVEvent = false;
+	let hasRecurrenceId = false;
+	let buffer: string[] = [];
+	for (const line of lines) {
+		if (line === "BEGIN:VEVENT") {
+			inVEvent = true;
+			hasRecurrenceId = false;
+			buffer = [line];
+			continue;
+		}
+		if (inVEvent) {
+			buffer.push(line);
+			if (line.startsWith("RECURRENCE-ID") && line.includes(recurrenceId)) hasRecurrenceId = true;
+			if (line === "END:VEVENT") {
+				inVEvent = false;
+				if (!hasRecurrenceId) result.push(...buffer);
+				buffer = [];
+			}
+		} else {
+			result.push(line);
+		}
+	}
+	return result.join("\r\n");
+}
+
 /** Rebuild an ICS string, replacing EXDATE lines for a specific UID's master event */
 function rebuildMasterWithExdate(icsText: string, uid: string, exdates: string[]): string {
 	// Remove existing EXDATE lines and add new ones before END:VEVENT
@@ -535,8 +713,10 @@ function rebuildMasterWithExdate(icsText: string, uid: string, exdates: string[]
 		if (inTargetVEvent && line.startsWith("UID:") && line.slice(4).trim() === uid) foundUid = true;
 		if (inTargetVEvent && foundUid && line.startsWith("EXDATE")) continue; // skip old EXDATEs
 		if (inTargetVEvent && foundUid && line === "END:VEVENT") {
-			// Inject new EXDATEs
-			for (const ex of exdates) result.push(`EXDATE:${ex}`);
+			// Inject new EXDATEs — use VALUE=DATE for date-only values (all-day events)
+			for (const ex of exdates) {
+				result.push(/^\d{8}$/.test(ex) ? `EXDATE;VALUE=DATE:${ex}` : `EXDATE:${ex}`);
+			}
 		}
 		result.push(line);
 		if (line === "END:VEVENT") { inTargetVEvent = false; foundUid = false; }

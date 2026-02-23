@@ -10,6 +10,23 @@
  *  - /.well-known/caldav discovery with manual redirect handling
  */
 
+import {
+	parse,
+	descendants,
+	descendant,
+	child,
+	children,
+	textContent,
+	attr,
+	type Element,
+} from "@pipobscure/xml";
+
+// ── Namespaces ────────────────────────────────────────────────────────────────
+
+const DAV = "DAV:";
+const CALDAV = "urn:ietf:params:xml:ns:caldav";
+const APPLE = "http://apple.com/ns/ical/";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface CalDAVCredentials {
@@ -41,64 +58,71 @@ function resolveUrl(base: string, href: string): string {
 	return new URL(href, base).toString();
 }
 
-/** Extract text content of the first tag matching name in XML string */
-function extractTag(xml: string, tag: string): string | null {
-	const re = new RegExp(`<[^>]*:?${tag}[^>]*>([\\s\\S]*?)<\\/[^>]*:?${tag}>`, "i");
-	const m = xml.match(re);
-	return m ? m[1].trim() : null;
+// ── XML Parsing Helpers ───────────────────────────────────────────────────────
+
+/** Parse a 207 Multi-Status response and return all <response> elements */
+function parseResponses(xml: string): Element[] {
+	return descendants(parse(xml), "response", DAV);
 }
 
-/** Extract all occurrences of a tag, return array of inner text */
-function extractAllTags(xml: string, tag: string): string[] {
-	const re = new RegExp(`<[^>]*:?${tag}[^>]*>([\\s\\S]*?)<\\/[^>]*:?${tag}>`, "gi");
-	const results: string[] = [];
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(xml)) !== null) {
-		results.push(m[1].trim());
-	}
-	return results;
+function getHref(response: Element): string {
+	return decodeURIComponent(textContent(child(response, "href", DAV)));
 }
 
-/** Split a 207 Multi-Status response into individual <response> blocks */
-function splitResponses(xml: string): string[] {
-	return extractAllTags(xml, "response");
+function getEtag(response: Element): string {
+	return textContent(descendant(response, "getetag", DAV)).replace(/^"|"$/g, "");
 }
 
-function extractHref(block: string): string {
-	return decodeURIComponent(extractTag(block, "href") ?? "");
+function getDisplayName(response: Element): string {
+	return textContent(descendant(response, "displayname", DAV));
 }
 
-function extractEtag(block: string): string {
-	const raw = extractTag(block, "getetag") ?? "";
-	return raw.replace(/^"|"$/g, "");
+/** Check if resourcetype contains a <calendar> element */
+function isCalendar(response: Element): boolean {
+	return !!descendant(response, "calendar", CALDAV);
 }
 
-function extractDisplayName(block: string): string {
-	return extractTag(block, "displayname") ?? "";
-}
-
-function isCalendar(block: string): boolean {
-	// Match <X:calendar/>, <X:calendar>, or <calendar/> in resourcetype block.
-	// Self-closing <cal:calendar/> is the most common form — the old regex missed it.
-	return /<[a-zA-Z]+:calendar[\s/>]/.test(block) || /<calendar[\s/>]/.test(block);
-}
-
-function isICSResource(block: string): boolean {
-	const ct = extractTag(block, "getcontenttype") ?? "";
-	const href = extractHref(block);
+function isICSResource(response: Element): boolean {
+	const ct = textContent(descendant(response, "getcontenttype", DAV));
+	const href = getHref(response);
 	return ct.includes("text/calendar") || href.endsWith(".ics");
 }
 
 /** Extract calendar color from Apple/Nextcloud extension properties */
-function extractCalendarColor(block: string): string | null {
+function extractCalendarColor(response: Element): string | null {
 	// Nextcloud/Apple: <apple:calendar-color>#3b82f6FF</apple:calendar-color>
-	// Some servers: <cal:calendar-color>#3b82f6</cal:calendar-color>
 	const raw =
-		extractTag(block, "calendar-color") ??
-		extractTag(block, "calendar-order"); // fallback to order if no color
+		textContent(descendant(response, "calendar-color", APPLE)) ||
+		textContent(descendant(response, "calendar-color", CALDAV)) ||
+		textContent(descendant(response, "calendar-order", APPLE));
 	if (!raw || !raw.startsWith("#")) return null;
 	// Strip alpha suffix if 9 chars (#RRGGBBAA)
-	return raw.length === 9 ? raw.slice(0, 7) : raw.slice(0, 7);
+	return raw.slice(0, 7);
+}
+
+/** Extract calendar-data (ICS content) from a response element.
+ *  textContent handles both CDATA sections and XML-encoded text automatically. */
+function extractCalendarData(response: Element): string | null {
+	const data = textContent(descendant(response, "calendar-data", CALDAV));
+	return data || null;
+}
+
+/** Find the current-user-principal URL from a PROPFIND response */
+function findPrincipalUrl(xml: string, base: string): string | null {
+	const doc = parse(xml);
+	const el =
+		descendant(doc, "current-user-principal", DAV) ?? descendant(doc, "principal-URL", DAV);
+	if (!el) return null;
+	const href = textContent(child(el, "href", DAV));
+	return href ? resolveUrl(base, href) : null;
+}
+
+function findCalendarHomeSetUrl(xml: string, base: string): string | null {
+	const doc = parse(xml);
+	const el = descendant(doc, "calendar-home-set", CALDAV);
+	if (!el) return null;
+	const href = textContent(child(el, "href", DAV));
+	return href ? resolveUrl(base, href) : null;
 }
 
 // ── PROPFIND helper ───────────────────────────────────────────────────────────
@@ -151,21 +175,6 @@ const PROPFIND_CALENDARS = `<?xml version="1.0" encoding="utf-8"?>
   </d:prop>
 </d:propfind>`;
 
-// ── Principal URL discovery ───────────────────────────────────────────────────
-
-function findPrincipalUrl(xml: string, base: string): string | null {
-	const inner =
-		extractTag(xml, "current-user-principal") ?? extractTag(xml, "principal-URL") ?? "";
-	const href = extractTag(inner, "href");
-	return href ? resolveUrl(base, href) : null;
-}
-
-function findCalendarHomeSetUrl(xml: string, base: string): string | null {
-	const inner = extractTag(xml, "calendar-home-set") ?? "";
-	const href = extractTag(inner, "href");
-	return href ? resolveUrl(base, href) : null;
-}
-
 // ── Service Discovery ─────────────────────────────────────────────────────────
 
 /**
@@ -210,53 +219,29 @@ export async function discoverCalendars(creds: CalDAVCredentials): Promise<Remot
 
 	// Step 3: List calendar collections under home set
 	const { xml } = await propfind(homeSetUrl, PROPFIND_CALENDARS, auth, "1");
-	const blocks = splitResponses(xml);
 	const calendars: RemoteCalendar[] = [];
 
-	for (const block of blocks) {
-		if (!isCalendar(block)) continue;
-		const href = extractHref(block);
+	for (const response of parseResponses(xml)) {
+		if (!isCalendar(response)) continue;
+		const href = getHref(response);
 		if (!href) continue;
 		const url = resolveUrl(baseUrl, href);
 		if (url === homeSetUrl) continue; // skip home set itself
 
 		// Only include calendars that support VEVENT
-		const supported = extractTag(block, "supported-calendar-component-set") ?? "";
-		if (supported && !supported.toLowerCase().includes("vevent")) continue;
+		const supportedEl = descendant(response, "supported-calendar-component-set", CALDAV);
+		if (supportedEl) {
+			const comps = children(supportedEl, "comp", CALDAV);
+			if (!comps.some((c) => attr(c, "name")?.toUpperCase() === "VEVENT")) continue;
+		}
 
-		const name =
-			extractDisplayName(block) || url.split("/").filter(Boolean).pop() || "Calendar";
+		const name = getDisplayName(response) || url.split("/").filter(Boolean).pop() || "Calendar";
 		const id = btoa(url).replace(/=/g, "");
-		const color = extractCalendarColor(block);
+		const color = extractCalendarColor(response);
 		calendars.push({ id, url, name, color });
 	}
 
 	return calendars;
-}
-
-/** Extract calendar-data (ICS content) from a response block; handles CDATA and XML-encoding */
-function extractCalendarData(block: string): string | null {
-	// CDATA section: <c:calendar-data><![CDATA[BEGIN:VCALENDAR...]]></c:calendar-data>
-	const cdataMatch = block.match(/<[^>]*:?calendar-data[^>]*>\s*<!\[CDATA\[([\s\S]*?)\]\]>/i);
-	if (cdataMatch) return cdataMatch[1].trim();
-	// Regular XML-encoded content
-	const raw = extractTag(block, "calendar-data");
-	if (!raw) return null;
-	return raw
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&amp;/g, "&")
-		.replace(/&quot;/g, '"')
-		.replace(/&apos;/g, "'");
-}
-
-/** Format a Date as a CalDAV UTC datetime string: "20260122T000000Z" */
-function toCalDAVDateTime(d: Date): string {
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return (
-		`${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
-		`T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-	);
 }
 
 // ── ETag Listing ──────────────────────────────────────────────────────────────
@@ -291,10 +276,10 @@ export async function listEtags(
 	});
 	const xml = await res.text();
 	const map = new Map<string, string>();
-	for (const block of splitResponses(xml)) {
-		const href = extractHref(block);
-		const etag = extractEtag(block);
-		if (href && (etag || isICSResource(block))) {
+	for (const response of parseResponses(xml)) {
+		const href = getHref(response);
+		const etag = getEtag(response);
+		if (href && (etag || isICSResource(response))) {
 			map.set(href, etag);
 		}
 	}
@@ -346,10 +331,10 @@ export async function fetchEventsInRange(
 	if (!res.ok) return [];
 	const xml = await res.text();
 	const results: Array<{ href: string; etag: string; ics: string }> = [];
-	for (const block of splitResponses(xml)) {
-		const href = extractHref(block);
-		const etag = extractEtag(block);
-		const ics = extractCalendarData(block);
+	for (const response of parseResponses(xml)) {
+		const href = getHref(response);
+		const etag = getEtag(response);
+		const ics = extractCalendarData(response);
 		if (href && ics) results.push({ href, etag, ics });
 	}
 	return results;
@@ -401,8 +386,15 @@ export async function createEvent(
 		throw new Error(`PUT ${url} → ${res.status} ${await res.text()}`);
 	}
 
-	const location = res.headers.get("Location");
-	const href = location ? new URL(location).pathname : new URL(url).pathname;
+	const locationHdr = res.headers.get("Location");
+	let href: string;
+	if (locationHdr) {
+		// Location header may be absolute ("https://...") or relative ("/caldav/...")
+		try { href = new URL(locationHdr).pathname; }
+		catch { href = locationHdr; } // already a path
+	} else {
+		href = new URL(url).pathname;
+	}
 	const etag = (res.headers.get("ETag") ?? "").replace(/^"|"$/g, "");
 	return { href, etag };
 }
@@ -428,9 +420,19 @@ export async function updateEvent(
 		body: ics,
 	});
 
-	if (res.status === 412) throw new Error("CONFLICT: ETag mismatch — event was modified on server");
+	if (res.status === 412) throw new Error("CONFLICT: Event was modified on server");
 	if (!res.ok && res.status !== 204) {
-		throw new Error(`PUT ${url} → ${res.status} ${await res.text()}`);
+		const body = await res.text();
+		console.log(`[caldavUpdate] PUT ${url} → ${res.status}, body=${body.slice(0, 300)}`);
+		// CalDAV no-uid-conflict (RFC 4791 §5.3.2): UID exists at a different href.
+		// Extract the conflicting href so the caller can retry to the correct location.
+		if (body.includes("no-uid-conflict")) {
+			const match = body.match(/<[^:>]*:?href[^>]*>([^<]+)<\/[^:>]*:?href>/i);
+			const conflictHref = match ? decodeURIComponent(match[1].trim()) : "";
+			console.log(`[caldavUpdate] UIDCONFLICT detected, conflictHref=${conflictHref || "(empty)"}`);
+			throw new Error(`UIDCONFLICT:${conflictHref}`);
+		}
+		throw new Error(`PUT ${url} → ${res.status} ${body}`);
 	}
 
 	return (res.headers.get("ETag") ?? "").replace(/^"|"$/g, "");

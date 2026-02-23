@@ -7,6 +7,8 @@
  * Only import from Bun (main-process) code.
  */
 
+import { Temporal } from "@js-temporal/polyfill";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ICalAttendee {
@@ -26,6 +28,8 @@ export interface ICalEvent {
 	summary: string;
 	description: string;
 	location: string;
+	/** URL property (RFC 5545) or URI extracted from CONFERENCE property */
+	url: string;
 	/** Raw value from ICS, e.g. "20240315T090000Z" or "20240315" */
 	dtstart: string;
 	/** TZID parameter from DTSTART (null if UTC or VALUE=DATE) */
@@ -78,6 +82,8 @@ export interface VEventInput {
 	summary: string;
 	description?: string;
 	location?: string;
+	/** URL property for the event (e.g. meeting join link) */
+	url?: string;
 	/** ISO datetime string in local timezone or UTC, e.g. "2024-03-15T09:00:00" */
 	startISO: string;
 	/** ISO datetime string */
@@ -94,6 +100,8 @@ export interface VEventInput {
 	method?: string;
 	/** Existing attendees with their PARTSTAT (for REPLY) */
 	existingAttendees?: ICalAttendee[];
+	/** RECURRENCE-ID for override instances (iCal datetime string, e.g. "20260222T100000Z") */
+	recurrenceId?: string;
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -147,9 +155,13 @@ function splitParams(s: string): string[] {
 	return parts;
 }
 
-/** Decode iCalendar text escapes (\n → newline, \\ → \, \; → ;, \, → ,) */
+/** Decode iCalendar text escapes (\n → newline, \\ → \, \; → ;, \, → ,) and HTML entities */
 function decodeText(s: string): string {
-	return s.replace(/\\n/gi, "\n").replace(/\\;/g, ";").replace(/\\,/g, ",").replace(/\\\\/g, "\\");
+	return s
+		.replace(/\\n/gi, "\n").replace(/\\;/g, ";").replace(/\\,/g, ",").replace(/\\\\/g, "\\")
+		.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+		.replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+		.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
 }
 
 /** Extract component blocks between BEGIN:X and END:X */
@@ -181,6 +193,7 @@ function parseVEvent(lines: string[]): ICalEvent {
 		summary: "",
 		description: "",
 		location: "",
+		url: "",
 		dtstart: "",
 		dtstartTzid: null,
 		dtstartIsDate: false,
@@ -205,8 +218,15 @@ function parseVEvent(lines: string[]): ICalEvent {
 	// Skip BEGIN/END lines
 	const content = lines.slice(1, -1);
 
+	// Track nesting depth for sub-components (VALARM, etc.) so we don't
+	// accidentally read a VALARM's UID as the event UID.
+	let subDepth = 0;
+
 	for (const line of content) {
 		if (!line.trim()) continue;
+		if (line.startsWith("BEGIN:")) { subDepth++; continue; }
+		if (line.startsWith("END:")) { subDepth--; continue; }
+		if (subDepth > 0) continue; // inside a sub-component (e.g. VALARM)
 		const { name, params, value } = parseLine(line);
 
 		switch (name) {
@@ -221,6 +241,14 @@ function parseVEvent(lines: string[]): ICalEvent {
 				break;
 			case "LOCATION":
 				event.location = decodeText(value);
+				break;
+			case "URL":
+				event.url = value.trim();
+				break;
+			case "CONFERENCE":
+				// RFC 7986: CONFERENCE;FEATURE=AUDIO,VIDEO;LABEL="Zoom":https://zoom.us/j/123
+				// The value is the URI; prefer this over URL if url not already set
+				if (!event.url) event.url = value.trim();
 				break;
 			case "DTSTART":
 				event.dtstart = value;
@@ -360,25 +388,117 @@ function encodeText(s: string): string {
 	return s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
 }
 
-/** Format a Date/ISO string to iCalendar datetime format */
+/**
+ * Format an ISO or iCal datetime string for use in an ICS property value.
+ *
+ * When tzid is provided: returns wall-clock local time as YYYYMMDDTHHMMSS (no Z).
+ *   - If the input is already in iCal local format, returns it unchanged.
+ *   - If the input is UTC (ends with Z), converts to the given timezone via Temporal.
+ *   - Otherwise (plain ISO local string like "2026-02-22T10:00:00"), strips dashes/colons.
+ *
+ * When tzid is absent: returns UTC as YYYYMMDDTHHMMSSZ.
+ */
 function formatDateTime(iso: string, isDate: boolean, tzid?: string): string {
 	if (isDate) {
-		// VALUE=DATE: YYYYMMDD
 		return iso.replace(/-/g, "").slice(0, 8);
 	}
-	// Parse ISO to iCal format YYYYMMDDTHHMMSS[Z]
+	if (tzid) {
+		// Already in iCal local format YYYYMMDDTHHMMSS
+		if (/^\d{8}T\d{6}$/.test(iso)) return iso;
+		// UTC string → convert to local time in the given timezone
+		if (iso.endsWith("Z")) {
+			try {
+				const inst = Temporal.Instant.from(iso);
+				const zdt = inst.toZonedDateTimeISO(tzid);
+				return (
+					String(zdt.year).padStart(4, "0") +
+					String(zdt.month).padStart(2, "0") +
+					String(zdt.day).padStart(2, "0") +
+					"T" +
+					String(zdt.hour).padStart(2, "0") +
+					String(zdt.minute).padStart(2, "0") +
+					String(zdt.second).padStart(2, "0")
+				);
+			} catch {
+				// fall through
+			}
+		}
+		// Plain local ISO string "2026-02-22T10:00:00[.xxx]" → strip dashes/colons
+		return iso.replace(/-/g, "").replace(/:/g, "").replace(/\.\d+/, "").slice(0, 15);
+	}
+	// No tzid: return UTC with Z suffix
+	if (/^\d{8}T\d{6}Z$/.test(iso)) return iso;
 	const d = new Date(iso);
-	if (isNaN(d.getTime())) {
-		// Already in iCal format
-		return iso;
+	if (isNaN(d.getTime())) return iso; // already some iCal format
+	return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+// ── VTIMEZONE generation ───────────────────────────────────────────────────────
+
+const vtimezoneCache = new Map<string, string>();
+
+/**
+ * Fetch a VTIMEZONE block for the given IANA timezone ID.
+ * Tries tzurl.org first (same source OX/mailbox.org uses), falls back to a
+ * Temporal-generated minimal VTIMEZONE if the network request fails.
+ */
+export async function getVTimezone(tzid: string): Promise<string> {
+	const cached = vtimezoneCache.get(tzid);
+	if (cached) return cached;
+
+	try {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), 4000);
+		const res = await fetch(
+			`https://www.tzurl.org/zoneinfo-outlook/${encodeURIComponent(tzid)}`,
+			{ signal: controller.signal },
+		);
+		clearTimeout(timer);
+		if (res.ok) {
+			const text = await res.text();
+			// The response is a full VCALENDAR — extract just the VTIMEZONE block
+			const match = text.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/);
+			if (match) {
+				const block = match[0];
+				vtimezoneCache.set(tzid, block);
+				return block;
+			}
+		}
+	} catch {
+		// network error or timeout → fall through to Temporal fallback
 	}
-	if (!tzid || iso.endsWith("Z")) {
-		// UTC
-		return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+
+	const fallback = generateVTimezone(tzid);
+	vtimezoneCache.set(tzid, fallback);
+	return fallback;
+}
+
+/** Generate a minimal VTIMEZONE using Temporal (used when tzurl.org is unreachable). */
+function generateVTimezone(tzid: string): string {
+	try {
+		const tz = Temporal.TimeZone.from(tzid);
+		const now = Temporal.Now.instant();
+		const offsetNs = tz.getOffsetNanosecondsFor(now);
+		const offsetMin = Math.round(offsetNs / 60_000_000_000);
+		const sign = offsetMin >= 0 ? "+" : "-";
+		const abs = Math.abs(offsetMin);
+		const h = String(Math.floor(abs / 60)).padStart(2, "0");
+		const m = String(abs % 60).padStart(2, "0");
+		const offset = `${sign}${h}${m}`;
+		return [
+			"BEGIN:VTIMEZONE",
+			`TZID:${tzid}`,
+			"BEGIN:STANDARD",
+			"DTSTART:19700101T000000",
+			`TZOFFSETFROM:${offset}`,
+			`TZOFFSETTO:${offset}`,
+			`TZNAME:${tzid}`,
+			"END:STANDARD",
+			"END:VTIMEZONE",
+		].join("\r\n");
+	} catch {
+		return ["BEGIN:VTIMEZONE", `TZID:${tzid}`, "END:VTIMEZONE"].join("\r\n");
 	}
-	// Local time with TZID — format without Z
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 /** Generate a new UID */
@@ -389,8 +509,14 @@ export function generateUID(): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}@euorg`;
 }
 
-/** Serialize a VEventInput into a VCALENDAR ICS string */
-export function serializeICS(input: VEventInput, existingEvents?: ICalEvent[]): string {
+/**
+ * Serialize a VEventInput into a VCALENDAR ICS string.
+ *
+ * Pass a pre-fetched VTIMEZONE block string as `vtimezone` when the event
+ * has a TZID. OX / mailbox.org requires a matching VTIMEZONE component.
+ * Use getVTimezone(tzid) to obtain it before calling this function.
+ */
+export function serializeICS(input: VEventInput, vtimezone?: string): string {
 	const uid = input.uid ?? generateUID();
 	const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 
@@ -398,8 +524,17 @@ export function serializeICS(input: VEventInput, existingEvents?: ICalEvent[]): 
 
 	if (input.method) lines.push(`METHOD:${input.method}`);
 
+	// Insert VTIMEZONE block before VEVENT (required by OX for TZID-based events)
+	if (vtimezone) lines.push(vtimezone);
+
 	lines.push("BEGIN:VEVENT");
 	lines.push(`UID:${uid}`);
+	if (input.recurrenceId) {
+		// All-day events use DATE format for RECURRENCE-ID (RFC 5545 §3.8.4.4)
+		lines.push(input.isAllDay
+			? `RECURRENCE-ID;VALUE=DATE:${input.recurrenceId}`
+			: `RECURRENCE-ID:${input.recurrenceId}`);
+	}
 	lines.push(`DTSTAMP:${now}`);
 	lines.push(`CREATED:${now}`);
 	lines.push(`LAST-MODIFIED:${now}`);
@@ -408,21 +543,25 @@ export function serializeICS(input: VEventInput, existingEvents?: ICalEvent[]): 
 
 	if (input.description) lines.push(`DESCRIPTION:${encodeText(input.description)}`);
 	if (input.location) lines.push(`LOCATION:${encodeText(input.location)}`);
+	if (input.url) lines.push(`URL:${input.url}`);
 
 	if (input.isAllDay) {
 		const startDate = formatDateTime(input.startISO, true);
 		const endDate = formatDateTime(input.endISO, true);
 		lines.push(`DTSTART;VALUE=DATE:${startDate}`);
 		lines.push(`DTEND;VALUE=DATE:${endDate}`);
-	} else if (input.tzid) {
+	} else {
 		const start = formatDateTime(input.startISO, false, input.tzid);
 		const end = formatDateTime(input.endISO, false, input.tzid);
-		lines.push(`DTSTART;TZID=${input.tzid}:${start}`);
-		lines.push(`DTEND;TZID=${input.tzid}:${end}`);
-	} else {
-		// UTC
-		lines.push(`DTSTART:${formatDateTime(input.startISO, false)}`);
-		lines.push(`DTEND:${formatDateTime(input.endISO, false)}`);
+		if (input.tzid) {
+			// Emit wall-clock time with TZID (VTIMEZONE block is included above)
+			lines.push(`DTSTART;TZID=${input.tzid}:${start}`);
+			lines.push(`DTEND;TZID=${input.tzid}:${end}`);
+		} else {
+			// No timezone: emit as UTC
+			lines.push(`DTSTART:${start}`);
+			lines.push(`DTEND:${end}`);
+		}
 	}
 
 	if (input.rrule) lines.push(`RRULE:${input.rrule}`);
@@ -469,6 +608,7 @@ export function updateEventInICS(
 		summary: updates.summary ?? ev.summary,
 		description: updates.description ?? ev.description,
 		location: updates.location ?? ev.location,
+		url: updates.url ?? ev.url,
 		startISO: updates.startISO ?? ev.dtstart,
 		endISO: updates.endISO ?? ev.dtend ?? ev.dtstart,
 		isAllDay: updates.isAllDay ?? ev.dtstartIsDate,

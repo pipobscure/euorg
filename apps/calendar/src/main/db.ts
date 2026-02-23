@@ -306,6 +306,14 @@ export class CalendarDB {
 		// Note: if only DURATION is present, dtend/dtendUtc remain null;
 		// instances.ts handles duration → end expansion at display time.
 
+		// SQLite treats NULL != NULL in composite primary keys, so ON CONFLICT (uid, recurrence_id)
+		// never fires when recurrence_id IS NULL, allowing duplicate non-override rows.
+		// Manually delete any existing non-override row with the same UID before upserting.
+		if (!event.recurrenceId) {
+			this.db.prepare("DELETE FROM events WHERE uid = ? AND recurrence_id IS NULL AND href != ?")
+				.run(event.uid, href);
+		}
+
 		const stmt = this.db.prepare(`
       INSERT INTO events
         (uid, account_id, calendar_id, etag, href, ics_path, summary, dtstart, dtend,
@@ -363,6 +371,22 @@ export class CalendarDB {
 		for (const { ics_path } of paths) deleteICSFile(ics_path);
 
 		this.db.prepare("DELETE FROM events WHERE uid = ?").run(uid);
+	}
+
+	/**
+	 * Remove event rows for a href whose UIDs are no longer present in the current ICS.
+	 * Used after parser fixes (e.g. VALARM-UID bug) to clean up stale rows that were
+	 * stored under wrong UIDs from the old parser.
+	 */
+	cleanupStaleHrefRows(href: string, validUids: string[]): void {
+		if (validUids.length === 0) return;
+		const placeholders = validUids.map(() => "?").join(", ");
+		const stale = this.db.prepare<{ ics_path: string }, unknown[]>(
+			`SELECT ics_path FROM events WHERE href = ? AND uid NOT IN (${placeholders})`,
+		).all(href, ...validUids);
+		for (const { ics_path } of stale) deleteICSFile(ics_path);
+		this.db.prepare(`DELETE FROM events WHERE href = ? AND uid NOT IN (${placeholders})`)
+			.run(href, ...validUids);
 	}
 
 	/** Delete all event rows with a given href (used when remote event is gone). */
