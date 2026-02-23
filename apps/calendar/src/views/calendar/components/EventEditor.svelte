@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { onMount, untrack } from "svelte";
 	import type { EventInstance, CalendarView, EventInput, RecurringEditScope } from "../lib/types.ts";
 	import { toDateStr, parseISO } from "../lib/types.ts";
 	import { rpc } from "../lib/rpc.ts";
@@ -65,6 +65,56 @@
 
 	const enabledCalendars = $derived(calendars.filter((c) => c.enabled && !c.readonly));
 
+	// ── Date/time validation: ensure end is always >= start ──────────────────
+
+	function advanceOneHour(date: string, time: string): { date: string; time: string } {
+		const [h, m] = time.split(":").map(Number);
+		const totalMins = h * 60 + m + 60;
+		const newH = Math.floor(totalMins / 60) % 24;
+		const newM = totalMins % 60;
+		const newTime = `${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
+		if (totalMins >= 24 * 60) {
+			const [y, mo, d] = date.split("-").map(Number);
+			const next = new Date(y, mo - 1, d + 1);
+			return {
+				date: `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`,
+				time: newTime,
+			};
+		}
+		return { date, time: newTime };
+	}
+
+	// Start changed → push end forward if end < start
+	$effect(() => {
+		const sd = startDate, st = startTime;
+		untrack(() => {
+			if (!isAllDay) {
+				if (`${endDate}T${endTime}` < `${sd}T${st}`) {
+					const adj = advanceOneHour(sd, st);
+					endDate = adj.date;
+					endTime = adj.time;
+				}
+			} else {
+				if (endDate < sd) endDate = sd;
+			}
+		});
+	});
+
+	// End changed → pull start back if end < start
+	$effect(() => {
+		const ed = endDate, et = endTime;
+		untrack(() => {
+			if (!isAllDay) {
+				if (`${ed}T${et}` < `${startDate}T${startTime}`) {
+					startDate = ed;
+					if (et < startTime) startTime = et;
+				}
+			} else {
+				if (ed < startDate) startDate = ed;
+			}
+		});
+	});
+
 	function buildRrule(): string | undefined {
 		switch (rrulePreset) {
 			case "daily": return "FREQ=DAILY";
@@ -104,6 +154,52 @@
 
 	function removeAttendee(i: number) {
 		attendees = attendees.filter((_, idx) => idx !== i);
+		if (suggestionsFor === i) suggestionsFor = null;
+	}
+
+	// ── Attendee autocomplete ─────────────────────────────────────────────────
+
+	let suggestionsFor = $state<number | null>(null);
+	let suggestions = $state<Array<{ email: string; cn: string }>>([]);
+
+	async function handleEmailInput(e: Event, i: number) {
+		const query = (e.target as HTMLInputElement).value.trim();
+		if (query.length < 2) {
+			suggestionsFor = null;
+			suggestions = [];
+			return;
+		}
+		try {
+			const results = await rpc.request.searchContacts({ query });
+			suggestions = results;
+			suggestionsFor = results.length > 0 ? i : null;
+		} catch {
+			suggestionsFor = null;
+			suggestions = [];
+		}
+	}
+
+	function selectSuggestion(i: number, sug: { email: string; cn: string }) {
+		attendees = attendees.map((a, idx) => idx === i ? { email: sug.email, cn: sug.cn } : a);
+		suggestionsFor = null;
+		suggestions = [];
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === "Escape") {
+			e.stopPropagation();
+			onCancel();
+		} else if (e.key === "Enter" && !e.shiftKey) {
+			const tag = (e.target as HTMLElement)?.tagName;
+			if (tag === "TEXTAREA" || tag === "SELECT") return; // let Enter work normally there
+			e.preventDefault();
+			e.stopPropagation();
+			if (!scopeConfirmed) {
+				scopeConfirmed = true;
+			} else if (summary.trim()) {
+				handleSave();
+			}
+		}
 	}
 
 	// Load description, location, and url from ICS when editing an existing event
@@ -127,7 +223,14 @@
 <div class="fixed inset-0 z-40 bg-black/40" onclick={onCancel} role="dialog" aria-modal="true" />
 
 <!-- Modal -->
-<div class="fixed inset-0 m-auto z-50 w-full max-w-lg h-fit rounded-2xl border border-surface-200-800 bg-surface-50-950 shadow-2xl">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div
+	class="fixed inset-0 m-auto z-50 w-full max-w-lg h-fit rounded-2xl border border-surface-200-800 bg-surface-50-950 shadow-2xl"
+	onkeydown={handleKeydown}
+	role="dialog"
+	aria-modal="true"
+	tabindex="-1"
+>
 	<!-- Header -->
 	<div class="flex items-center justify-between border-b border-surface-200-800 px-6 py-4">
 		<h2 class="text-base font-semibold text-surface-900-100">
@@ -250,7 +353,36 @@
 				</div>
 				{#each attendees as att, i}
 					<div class="flex items-center gap-2">
-						<input type="email" bind:value={att.email} placeholder="email@example.com" class="input flex-1 text-sm py-1" />
+						<div class="relative flex-1">
+							<input
+								type="email"
+								bind:value={att.email}
+								oninput={(e) => handleEmailInput(e, i)}
+								onblur={() => setTimeout(() => { if (suggestionsFor === i) suggestionsFor = null; }, 150)}
+								placeholder="email@example.com"
+								class="input w-full text-sm py-1"
+							/>
+							{#if suggestionsFor === i && suggestions.length > 0}
+								<ul class="absolute left-0 top-full z-50 mt-0.5 w-full rounded-lg border border-surface-200-800 bg-surface-50-950 shadow-lg overflow-hidden">
+									{#each suggestions as sug}
+										<li>
+											<button
+												type="button"
+												class="w-full px-3 py-1.5 text-left text-sm hover:bg-surface-100-900"
+												onmousedown={(e) => { e.preventDefault(); selectSuggestion(i, sug); }}
+											>
+												{#if sug.cn}
+													<span class="font-medium">{sug.cn}</span>
+													<span class="text-surface-400-600 ml-1">&lt;{sug.email}&gt;</span>
+												{:else}
+													{sug.email}
+												{/if}
+											</button>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</div>
 						<input type="text" bind:value={att.cn} placeholder="Name (optional)" class="input w-32 text-sm py-1" />
 						<button onclick={() => removeAttendee(i)} class="text-surface-400-600 hover:text-error-500">
 							<svg class="size-4" viewBox="0 0 20 20" fill="currentColor">

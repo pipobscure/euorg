@@ -31,11 +31,12 @@
 
 	// ── State ────────────────────────────────────────────────────────────────
 
-	let prefs = $state<CalendarPrefs>({ startOfWeek: getLocaleWeekStart(), defaultView: "week", dayStart: 7, dayEnd: 22, showWeekNumbers: false });
+	let prefs = $state<CalendarPrefs>({ startOfWeek: getLocaleWeekStart(), defaultView: "week", dayStart: 7, dayEnd: 22 });
 
 	let viewMode = $state<ViewMode>("week");
 	let navDate = $state<Date>(new Date());
 	let displayTzid = $state<string>(Intl.DateTimeFormat().resolvedOptions().timeZone);
+let searchFocusTrigger = $state(0);
 
 	let instances = $state<EventInstance[]>([]);
 	let calendars = $state<CalendarView[]>([]);
@@ -163,6 +164,8 @@
 				showNotification("Event created");
 			}
 			showEditor = false;
+			navDate = parseISO(input.startISO);
+			viewMode = "day";
 			await loadInstances();
 		} catch (e) {
 			showNotification(e instanceof Error ? e.message : "Failed to save event", "error");
@@ -283,7 +286,31 @@
 
 	// ── Init ──────────────────────────────────────────────────────────────────
 
+	// ── Keyboard shortcuts ────────────────────────────────────────────────────
+
+	function handleGlobalKeydown(e: KeyboardEvent) {
+		// Only fire when no modal overlay is open
+		if (showEditor || showSettings || showImport) return;
+		// Don't intercept plain typing in inputs
+		const tag = (e.target as HTMLElement)?.tagName;
+		if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+		if (e.ctrlKey || e.metaKey) {
+			switch (e.key) {
+				case "n": e.preventDefault(); openNewEvent(); break;
+				case ",": e.preventDefault(); showSettings = true; break;
+				case "m": e.preventDefault(); viewMode = "month"; break;
+				case "w": e.preventDefault(); viewMode = "week"; break;
+				case "d": e.preventDefault(); viewMode = "day"; break;
+				case "t": e.preventDefault(); goToday(); break;
+				case "f": e.preventDefault(); searchFocusTrigger++; break;
+			}
+		}
+	}
+
 	onMount(async () => {
+		document.addEventListener("keydown", handleGlobalKeydown);
+
 		await Promise.all([loadCalendars(), loadAccounts()]);
 		const [tz, loadedPrefs] = await Promise.all([
 			rpc.request.getDisplayTimezone(),
@@ -298,6 +325,8 @@
 		viewMode = loadedPrefs.defaultView;
 		// Trigger startup sync now that we know the RPC connection is live
 		triggerSync();
+
+		return () => document.removeEventListener("keydown", handleGlobalKeydown);
 	});
 </script>
 
@@ -320,6 +349,11 @@
 			onNewEvent={() => openNewEvent()}
 			onSync={triggerSync}
 			onSettings={() => { showSettings = true; }}
+			focusSearchTrigger={searchFocusTrigger}
+			onSearchResult={(uid, dtstartUtc) => {
+				navDate = new Date(dtstartUtc);
+				viewMode = "day";
+			}}
 		/>
 	</header>
 
@@ -344,9 +378,11 @@
 					{displayTzid}
 					{calendars}
 					startOfWeek={prefs.startOfWeek}
-					showWeekNumbers={prefs.showWeekNumbers}
-					onEventClick={openPopover}
+						onEventClick={openPopover}
+					onEventDblClick={(inst) => { navDate = parseISO(inst.startISO); viewMode = "day"; }}
 					onDayClick={(date) => openNewEvent(date)}
+					onDayDblClick={(date) => { navDate = parseISO(date); viewMode = "day"; }}
+					onWeekDblClick={(date) => { navDate = parseISO(date); viewMode = "week"; }}
 					onDrop={async (instanceId, newDate) => {
 						const inst = instances.find((i) => i.instanceId === instanceId);
 						if (!inst) return;
@@ -363,8 +399,9 @@
 					startOfWeek={prefs.startOfWeek}
 					dayStart={prefs.dayStart}
 					dayEnd={prefs.dayEnd}
-					showWeekNumbers={prefs.showWeekNumbers}
-					onEventClick={openPopover}
+						onEventClick={openPopover}
+					onEventDblClick={(inst) => { navDate = parseISO(inst.startISO); viewMode = "day"; }}
+					onDayDblClick={(date) => { navDate = parseISO(date); viewMode = "day"; }}
 					onSlotClick={(dateISO) => openNewEvent(dateISO.slice(0, 10))}
 					onDrop={handleReschedule}
 				/>
@@ -375,8 +412,9 @@
 					{displayTzid}
 					dayStart={prefs.dayStart}
 					dayEnd={prefs.dayEnd}
-					showWeekNumbers={prefs.showWeekNumbers}
 					onEventClick={openPopover}
+					onEventDblClick={openEditEvent}
+					onWeekClick={(date) => { navDate = parseISO(date); viewMode = "week"; }}
 					onSlotClick={(dateISO) => openNewEvent(dateISO.slice(0, 10))}
 					onDrop={handleReschedule}
 				/>
@@ -394,6 +432,7 @@
 		instance={popoverInstance}
 		anchor={popoverAnchor}
 		{displayTzid}
+		{calendars}
 		onEdit={() => openEditEvent(popoverInstance!)}
 		onDelete={(scope, instanceStartISO) => handleDeleteEvent(popoverInstance!.uid, scope, instanceStartISO)}
 		onClose={closePopover}

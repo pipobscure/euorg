@@ -12,13 +12,44 @@
 		startOfWeek: "monday" | "sunday";
 		dayStart: number;
 		dayEnd: number;
-		showWeekNumbers: boolean;
 		onEventClick: (instance: EventInstance, anchor: DOMRect) => void;
+		onEventDblClick: (instance: EventInstance) => void;
+		onDayDblClick: (date: string) => void;
 		onSlotClick: (dateISO: string) => void;
 		onDrop: (uid: string, instanceStartISO: string, newStartISO: string) => void;
 	}
 
-	let { instances, navDate, displayTzid, startOfWeek, dayStart, dayEnd, showWeekNumbers, onEventClick, onSlotClick, onDrop }: Props = $props();
+	let { instances, navDate, displayTzid, startOfWeek, dayStart, dayEnd, onEventClick, onEventDblClick, onDayDblClick, onSlotClick, onDrop }: Props = $props();
+
+	let _clickTimer: ReturnType<typeof setTimeout> | null = null;
+	let _dayClickTimer: ReturnType<typeof setTimeout> | null = null;
+	let _dayClickDate: string | null = null;
+
+	function handleDayHeaderClick(dateStr: string) {
+		if (_dayClickTimer !== null && _dayClickDate === dateStr) {
+			clearTimeout(_dayClickTimer);
+			_dayClickTimer = null;
+			_dayClickDate = null;
+			onDayDblClick(dateStr);
+		} else {
+			if (_dayClickTimer !== null) clearTimeout(_dayClickTimer);
+			_dayClickDate = dateStr;
+			_dayClickTimer = setTimeout(() => { _dayClickTimer = null; _dayClickDate = null; }, 300);
+		}
+	}
+
+	function handleEventClick(inst: EventInstance, e: MouseEvent) {
+		e.stopPropagation();
+		if (_clickTimer !== null) {
+			clearTimeout(_clickTimer);
+			_clickTimer = null;
+			onEventDblClick(inst);
+		} else {
+			const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+			_clickTimer = setTimeout(() => { _clickTimer = null; onEventClick(inst, rect); }, 300);
+		}
+	}
+
 
 	const HOUR_HEIGHT = 60; // px per hour
 	const TOTAL_HEIGHT = HOUR_HEIGHT * 24;
@@ -152,14 +183,14 @@
 	<div class="shrink-0">
 		<div class="flex border-b border-surface-200-800">
 			<div class="w-14 shrink-0 flex items-end justify-center pb-1">
-				{#if showWeekNumbers}
-					<span class="text-xs font-medium text-surface-400-600">W{getISOWeekNumber(weekDays[0])}</span>
-				{/if}
+				<span class="text-xs font-medium text-surface-400-600">W{getISOWeekNumber(weekDays[0])}</span>
 			</div> <!-- time gutter -->
 			{#each weekDays as day (toDateStr(day))}
 				{@const dateStr = toDateStr(day)}
 				{@const isToday = dateStr === today}
-				<div class="flex-1 py-1 text-center">
+				<div class="flex-1 py-1 text-center cursor-pointer"
+					onclick={() => handleDayHeaderClick(dateStr)}
+				>
 					<div class="text-xs text-surface-500-400">
 						{day.toLocaleDateString("en-US", { weekday: "short" })}
 					</div>
@@ -183,7 +214,7 @@
 					<div class="flex-1 border-l border-surface-200-800 py-0.5 px-0.5 min-h-6">
 						{#each dayInstances as inst (inst.instanceId)}
 							<button
-								onclick={(e) => onEventClick(inst, (e.currentTarget as HTMLElement).getBoundingClientRect())}
+								onclick={(e) => handleEventClick(inst, e)}
 								class="mb-0.5 block w-full truncate rounded px-1 py-0.5 text-left text-xs text-white font-medium hover:opacity-80"
 								style="background-color: {inst.color};"
 							>{inst.summary}</button>
@@ -226,6 +257,7 @@
 						const h = Math.floor(minutes / 60);
 						const m = minutes % 60;
 						const pad = (n: number) => String(n).padStart(2, "0");
+						if ((e.target as HTMLElement).closest("button")) return;
 						onSlotClick(`${dateStr}T${pad(h)}:${pad(m)}:00`);
 					}}
 					role="gridcell"
@@ -261,10 +293,7 @@
 						<button
 							draggable="true"
 							ondragstart={(e) => { e.stopPropagation(); handleDragStart(e, inst); }}
-							onclick={(e) => {
-								e.stopPropagation();
-								onEventClick(inst, (e.currentTarget as HTMLElement).getBoundingClientRect());
-							}}
+							onclick={(e) => handleEventClick(inst, e)}
 							class="absolute rounded px-1 py-0.5 text-left text-xs text-white overflow-hidden hover:opacity-90 transition-opacity cursor-pointer"
 							style="
 								top: {top}px;

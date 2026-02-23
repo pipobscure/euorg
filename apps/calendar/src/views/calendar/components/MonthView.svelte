@@ -11,13 +11,30 @@
 		displayTzid: string;
 		calendars: CalendarView[];
 		startOfWeek: "monday" | "sunday";
-		showWeekNumbers: boolean;
 		onEventClick: (instance: EventInstance, anchor: DOMRect) => void;
+		onEventDblClick: (instance: EventInstance) => void;
 		onDayClick: (date: string) => void;
+		onDayDblClick: (date: string) => void;
+		onWeekDblClick: (date: string) => void;
 		onDrop: (instanceId: string, newDate: string) => void;
 	}
 
-	let { instances, navDate, displayTzid, calendars, startOfWeek, showWeekNumbers, onEventClick, onDayClick, onDrop }: Props = $props();
+	let { instances, navDate, displayTzid, calendars, startOfWeek, onEventClick, onEventDblClick, onDayClick, onDayDblClick, onWeekDblClick, onDrop }: Props = $props();
+
+	let _clickTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function handleEventClick(inst: EventInstance, e: MouseEvent) {
+		e.stopPropagation();
+		if (_clickTimer !== null) {
+			clearTimeout(_clickTimer);
+			_clickTimer = null;
+			onEventDblClick(inst);
+		} else {
+			const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+			_clickTimer = setTimeout(() => { _clickTimer = null; onEventClick(inst, rect); }, 250);
+		}
+	}
+
 
 	const MAX_VISIBLE_EVENTS = 3;
 
@@ -104,9 +121,7 @@
 <div class="flex flex-1 flex-col overflow-hidden select-none">
 	<!-- Day headers -->
 	<div class="flex border-b border-surface-200-800 bg-surface-50-950">
-		{#if showWeekNumbers}
-			<div class="w-8 shrink-0 border-r border-surface-200-800" />
-		{/if}
+		<div class="w-8 shrink-0 border-r border-surface-200-800" />
 		<div class="flex-1 grid grid-cols-7">
 			{#each dayLabels as day}
 				<div class="py-1 text-center text-xs font-medium text-surface-500-400">{day}</div>
@@ -119,11 +134,14 @@
 		{#each weeks as week, wi (wi)}
 			<div class="flex flex-1 border-b border-surface-200-800 overflow-hidden">
 				<!-- Week number column -->
-				{#if showWeekNumbers}
-					<div class="w-8 shrink-0 border-r border-surface-200-800 flex items-start justify-center pt-1">
-						<span class="text-xs text-surface-400-600">{getISOWeekNumber(week[0])}</span>
-					</div>
-				{/if}
+				<div
+					class="w-8 shrink-0 border-r border-surface-200-800 flex items-start justify-center pt-1 cursor-pointer hover:bg-surface-50-950"
+					ondblclick={() => onWeekDblClick(toDateStr(week[0]))}
+					role="button"
+					title="Show week"
+				>
+					<span class="text-xs text-surface-400-600">{getISOWeekNumber(week[0])}</span>
+				</div>
 				<!-- 7 day cells -->
 				<div class="flex-1 grid grid-cols-7 overflow-hidden">
 					{#each week as day (toDateStr(day))}
@@ -139,6 +157,7 @@
 								{isDropTarget ? 'bg-primary-50 dark:bg-primary-950' : 'hover:bg-surface-50-950'}"
 							ondragover={(e) => handleDragOver(e, dateStr)}
 							ondrop={(e) => handleDrop(e, dateStr)}
+							ondblclick={() => onDayDblClick(dateStr)}
 							role="gridcell"
 						>
 							<!-- Day number -->
@@ -154,10 +173,8 @@
 									draggable="true"
 									ondragstart={(e) => handleDragStart(e, inst.instanceId)}
 									ondragend={handleDragEnd}
-									onclick={(e) => {
-										e.stopPropagation();
-										onEventClick(inst, (e.currentTarget as HTMLElement).getBoundingClientRect());
-									}}
+									onclick={(e) => handleEventClick(inst, e)}
+
 									class="w-full truncate rounded px-1 py-0.5 text-left text-xs text-white font-medium hover:opacity-80 transition-opacity"
 									style="background-color: {inst.color};"
 								>

@@ -184,14 +184,27 @@ function rowToInstance(
 	};
 }
 
-/** Get description, location, and url from raw ICS (expensive, only for detail view) */
-export function getEventDetail(row: EventRow): { description: string; location: string; url: string } {
+/** Get description, location, url, organizer, and attendees from raw ICS (expensive, only for detail view) */
+export function getEventDetail(row: EventRow): {
+	description: string;
+	location: string;
+	url: string;
+	organizer: string;
+	attendees: Array<{ email: string; cn: string; partstat: string; role: string }>;
+} {
+	const empty = { description: "", location: "", url: "", organizer: "", attendees: [] };
 	const ics = readICS(row.icsPath);
-	if (!ics) return { description: "", location: "", url: "" };
+	if (!ics) return empty;
 	const obj = parseICS(ics);
 	const ev = obj.events.find((e) => e.uid === row.uid);
-	if (!ev) return { description: "", location: "", url: "" };
-	return { description: ev.description, location: ev.location, url: ev.url };
+	if (!ev) return empty;
+	return {
+		description: ev.description,
+		location: ev.location,
+		url: ev.url,
+		organizer: ev.organizer,
+		attendees: ev.attendees.map((a) => ({ email: a.email, cn: a.cn, partstat: a.partstat, role: a.role })),
+	};
 }
 
 // ── Main Query Function ───────────────────────────────────────────────────────

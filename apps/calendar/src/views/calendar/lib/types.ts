@@ -12,7 +12,6 @@ export interface CalendarPrefs {
 	defaultView: ViewMode;
 	dayStart: number; // 0-23, hour the time grid scrolls to on open
 	dayEnd: number;   // 0-23, informational (reserved for future use)
-	showWeekNumbers: boolean;
 }
 
 /** Detect the locale's preferred first day of the week via Intl.Locale.weekInfo. */

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { ViewMode } from "../lib/types.ts";
+	import { rpc } from "../lib/rpc.ts";
 	import {
 		getMondayOf, addDays, formatMonth, formatShortDate, formatLongDate, COMMON_TIMEZONES,
 	} from "../lib/types.ts";
@@ -16,12 +17,48 @@
 		onNewEvent: () => void;
 		onSync: () => void;
 		onSettings: () => void;
+		onSearchResult: (uid: string, dtstartUtc: string) => void;
+		focusSearchTrigger?: number;
 	}
 
 	let {
 		viewMode, navDate, displayTzid, isSyncing,
-		onViewChange, onNavigate, onToday, onTzChange, onNewEvent, onSync, onSettings,
+		onViewChange, onNavigate, onToday, onTzChange, onNewEvent, onSync, onSettings, onSearchResult,
+		focusSearchTrigger,
 	}: Props = $props();
+
+	$effect(() => {
+		if (focusSearchTrigger) searchEl?.focus();
+	});
+
+	// ── Event search ─────────────────────────────────────────────────────────
+	let searchQuery = $state("");
+	let searchResults = $state<Array<{ uid: string; recurrenceId: string | null; summary: string; dtstartUtc: string; calendarId: string; color: string; calendarName: string }>>([]);
+	let searchOpen = $state(false);
+	let searchEl = $state<HTMLInputElement | null>(null);
+
+	async function handleSearchInput(e: Event) {
+		const q = (e.target as HTMLInputElement).value.trim();
+		searchQuery = (e.target as HTMLInputElement).value;
+		if (q.length < 2) { searchResults = []; searchOpen = false; return; }
+		try {
+			const results = await rpc.request.searchEvents({ query: q });
+			searchResults = results;
+			searchOpen = results.length > 0;
+		} catch { searchResults = []; searchOpen = false; }
+	}
+
+	function selectSearchResult(r: typeof searchResults[0]) {
+		onSearchResult(r.uid, r.dtstartUtc);
+		searchQuery = "";
+		searchResults = [];
+		searchOpen = false;
+	}
+
+	function formatSearchDate(utc: string): string {
+		const d = new Date(utc);
+		return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+	}
 
 	const dateLabel = $derived.by(() => {
 		if (viewMode === "day") return formatLongDate(navDate);
@@ -123,6 +160,55 @@
 			<path fill-rule="evenodd" d="M8.22 5.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 1 1-1.06-1.06L11.94 10 8.22 6.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/>
 		</svg>
 	</button>
+
+	<!-- Search -->
+	<div class="relative mx-2">
+		<div class="flex items-center gap-1.5 rounded-lg border border-surface-200-800 bg-surface-100-900 px-2 py-1">
+			<svg class="size-4 shrink-0 text-surface-400-600" viewBox="0 0 20 20" fill="currentColor">
+				<path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clip-rule="evenodd"/>
+			</svg>
+			<input
+				bind:this={searchEl}
+				type="text"
+				value={searchQuery}
+				oninput={handleSearchInput}
+				onblur={() => setTimeout(() => { searchOpen = false; }, 150)}
+				onfocus={() => { if (searchResults.length > 0) searchOpen = true; }}
+				placeholder="Search events…"
+				class="bg-transparent text-sm outline-none w-44 placeholder:text-surface-400-600"
+			/>
+			{#if searchQuery}
+				<button
+					type="button"
+					onclick={() => { searchQuery = ''; searchResults = []; searchOpen = false; searchEl?.focus(); }}
+					class="text-surface-400-600 hover:text-surface-700-300"
+				>
+					<svg class="size-3.5" viewBox="0 0 20 20" fill="currentColor">
+						<path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"/>
+					</svg>
+				</button>
+			{/if}
+		</div>
+		{#if searchOpen && searchResults.length > 0}
+			<ul class="absolute left-0 top-full z-50 mt-1 w-80 rounded-lg border border-surface-200-800 bg-surface-50-950 shadow-xl overflow-hidden">
+				{#each searchResults as r}
+					<li>
+						<button
+							type="button"
+							class="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface-100-900"
+							onmousedown={(e) => { e.preventDefault(); selectSearchResult(r); }}
+						>
+							<div class="size-2.5 shrink-0 rounded-full" style="background-color: {r.color};"></div>
+							<div class="flex-1 min-w-0">
+								<p class="truncate text-sm font-medium text-surface-900-100">{r.summary}</p>
+								<p class="text-xs text-surface-500-400">{formatSearchDate(r.dtstartUtc)}{r.calendarName ? ' · ' + r.calendarName : ''}</p>
+							</div>
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</div>
 
 	<div class="flex-1" />
 

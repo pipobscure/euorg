@@ -6,7 +6,8 @@
  */
 
 import { BrowserView, BrowserWindow, type ElectrobunRPCSchema, type RPCSchema } from "electrobun/bun";
-import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { Database } from "bun:sqlite";
 import { join } from "path";
 import { homedir } from "os";
 import { Temporal } from "@js-temporal/polyfill";
@@ -75,7 +76,6 @@ interface CalendarPrefs {
 	defaultView: "day" | "week" | "month";
 	dayStart: number;
 	dayEnd: number;
-	showWeekNumbers: boolean;
 }
 
 function getCalendarPrefs(): CalendarPrefs {
@@ -86,7 +86,6 @@ function getCalendarPrefs(): CalendarPrefs {
 		defaultView: (cfg.calendarDefaultView as "day" | "week" | "month") ?? "week",
 		dayStart: (cfg.calendarDayStart as number) ?? 7,
 		dayEnd: (cfg.calendarDayEnd as number) ?? 22,
-		showWeekNumbers: (cfg.calendarShowWeekNumbers as boolean) ?? false,
 	};
 }
 
@@ -105,7 +104,6 @@ function saveCalendarPrefs(prefs: Partial<CalendarPrefs>): void {
 	if (prefs.defaultView !== undefined) updated.calendarDefaultView = prefs.defaultView;
 	if (prefs.dayStart !== undefined) updated.calendarDayStart = prefs.dayStart;
 	if (prefs.dayEnd !== undefined) updated.calendarDayEnd = prefs.dayEnd;
-	if (prefs.showWeekNumbers !== undefined) updated.calendarShowWeekNumbers = prefs.showWeekNumbers;
 	writeFileSync(
 		EUORG_CONFIG_PATH,
 		JSON.stringify(updated, null, 2) + "\n",
@@ -206,7 +204,13 @@ interface CalendarRPCSchema extends ElectrobunRPCSchema {
 			getEventIcs: { params: { uid: string }; response: string | null };
 			getEventDetail: {
 				params: { uid: string };
-				response: { description: string; location: string; url: string } | null;
+				response: {
+					description: string;
+					location: string;
+					url: string;
+					organizer: string;
+					attendees: Array<{ email: string; cn: string; partstat: string; role: string }>;
+				} | null;
 			};
 			openExternal: { params: { url: string }; response: void };
 			getTravelInfo: {
@@ -275,6 +279,11 @@ interface CalendarRPCSchema extends ElectrobunRPCSchema {
 			setCalendarPrefs: { params: Partial<CalendarPrefs>; response: void };
 			getKeystoreType: { params: void; response: KeystoreType };
 			setKeystoreType: { params: { type: KeystoreType }; response: void };
+			searchContacts: { params: { query: string }; response: Array<{ email: string; cn: string }> };
+			searchEvents: {
+				params: { query: string };
+				response: Array<{ uid: string; recurrenceId: string | null; summary: string; dtstartUtc: string; calendarId: string; color: string; calendarName: string }>;
+			};
 		};
 		messages: {};
 	}>;
@@ -361,25 +370,30 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 			},
 
 			async createEvent({ input }) {
-				const cfg = readAccounts();
-				let accountId = "";
-				for (const a of cfg.accounts) {
-					if (a.caldav?.calendars.some((c) => c.id === input.calendarId)) {
-						accountId = a.id;
-						break;
+				try {
+					const cfg = readAccounts();
+					let accountId = "";
+					for (const a of cfg.accounts) {
+						if (a.caldav?.calendars.some((c) => c.id === input.calendarId)) {
+							accountId = a.id;
+							break;
+						}
 					}
+					if (!accountId) throw new Error(`No account found for calendar ${input.calendarId}`);
+					const uid = await writeCreate(db, {
+						...input,
+						description: input.description,
+						location: input.location,
+						url: input.url,
+						rrule: input.rrule,
+						attendees: input.attendees,
+					}, input.calendarId, accountId);
+					rpc.send("eventChanged", { uid, action: "created" });
+					return { uid };
+				} catch (e) {
+					console.error("[calendar] createEvent failed:", e instanceof Error ? e.message : e);
+					throw e;
 				}
-				if (!accountId) throw new Error(`No account found for calendar ${input.calendarId}`);
-				const uid = await writeCreate(db, {
-					...input,
-					description: input.description,
-					location: input.location,
-					url: input.url,
-					rrule: input.rrule,
-					attendees: input.attendees,
-				}, input.calendarId, accountId);
-				rpc.send("eventChanged", { uid, action: "created" });
-				return { uid };
 			},
 
 			async updateEvent({ uid, input, scope, instanceStartISO }) {
@@ -702,6 +716,44 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 			async setCalendarPrefs(prefs) { saveCalendarPrefs(prefs); },
 			async getKeystoreType() { return getKeystoreType(); },
 			async setKeystoreType({ type }) { setKeystoreType(type); },
+			async searchContacts({ query }) {
+				const dbPath = join(homedir(), ".euorg", "contacts", "contacts.db");
+				if (!existsSync(dbPath)) return [];
+				let cdb: Database | null = null;
+				try {
+					cdb = new Database(dbPath, { readonly: true });
+					const q = `%${query.toLowerCase()}%`;
+					const rows = cdb.query(
+						`SELECT display_name, emails FROM contacts WHERE lower(display_name) LIKE ? OR lower(emails) LIKE ? ORDER BY display_name COLLATE NOCASE LIMIT 20`
+					).all(q, q) as Array<{ display_name: string; emails: string }>;
+					const results: Array<{ email: string; cn: string }> = [];
+					for (const row of rows) {
+						let emails: Array<{ value: string }> = [];
+						try { emails = JSON.parse(row.emails); } catch {}
+						for (const e of emails) {
+							if (e.value) results.push({ email: e.value, cn: row.display_name });
+						}
+					}
+					return results;
+				} catch { return []; }
+				finally { cdb?.close(); }
+			},
+			async searchEvents({ query }) {
+				const calMap = buildCalendarMap();
+				const rows = db.searchEvents(query);
+				return rows.map((r) => {
+					const cal = calMap.get(r.calendarId);
+					return {
+						uid: r.uid,
+						recurrenceId: r.recurrenceId,
+						summary: r.summary,
+						dtstartUtc: r.dtstartUtc,
+						calendarId: r.calendarId,
+						color: cal?.color ?? '#6366f1',
+						calendarName: cal?.name ?? '',
+					};
+				});
+			},
 		},
 		messages: {},
 	},

@@ -10,13 +10,28 @@
 		displayTzid: string;
 		dayStart: number;
 		dayEnd: number;
-		showWeekNumbers: boolean;
 		onEventClick: (instance: EventInstance, anchor: DOMRect) => void;
+		onEventDblClick: (instance: EventInstance) => void;
+		onWeekClick: (date: string) => void;
 		onSlotClick: (dateISO: string) => void;
 		onDrop: (uid: string, instanceStartISO: string, newStartISO: string) => void;
 	}
 
-	let { instances, navDate, displayTzid, dayStart, dayEnd, showWeekNumbers, onEventClick, onSlotClick, onDrop }: Props = $props();
+	let { instances, navDate, displayTzid, dayStart, dayEnd, onEventClick, onEventDblClick, onWeekClick, onSlotClick, onDrop }: Props = $props();
+
+	let _clickTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function handleEventClick(inst: EventInstance, e: MouseEvent) {
+		e.stopPropagation();
+		if (_clickTimer !== null) {
+			clearTimeout(_clickTimer);
+			_clickTimer = null;
+			onEventDblClick(inst);
+		} else {
+			const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+			_clickTimer = setTimeout(() => { _clickTimer = null; onEventClick(inst, rect); }, 300);
+		}
+	}
 
 	const HOUR_HEIGHT = 60;
 	const TOTAL_HEIGHT = HOUR_HEIGHT * 24;
@@ -88,9 +103,11 @@
 	<div class="shrink-0">
 		<div class="flex border-b border-surface-200-800">
 			<div class="w-14 shrink-0 flex items-end justify-center pb-1">
-				{#if showWeekNumbers}
-					<span class="text-xs font-medium text-surface-400-600">W{getISOWeekNumber(navDate)}</span>
-				{/if}
+				<button
+					onclick={() => onWeekClick(toDateStr(navDate))}
+					class="text-xs font-medium text-surface-400-600 hover:text-surface-700-300 cursor-pointer"
+					title="Show week"
+				>W{getISOWeekNumber(navDate)}</button>
 			</div>
 			<div class="flex-1 border-l border-surface-200-800 py-2 text-center">
 				<div class="text-xs text-surface-500-400">
@@ -108,7 +125,7 @@
 				<div class="flex-1 border-l border-surface-200-800 py-0.5 px-1">
 					{#each allDayInstances as inst (inst.instanceId)}
 						<button
-							onclick={(e) => onEventClick(inst, (e.currentTarget as HTMLElement).getBoundingClientRect())}
+							onclick={(e) => handleEventClick(inst, e)}
 							class="mb-0.5 block w-full truncate rounded px-2 py-1 text-left text-sm text-white font-medium hover:opacity-80"
 							style="background-color: {inst.color};"
 						>{inst.summary}</button>
@@ -141,6 +158,7 @@
 					const minutes = Math.floor((relY / TOTAL_HEIGHT) * 1440 / SNAP_MINUTES) * SNAP_MINUTES;
 					const h = Math.floor(minutes / 60), m = minutes % 60;
 					const pad = (n: number) => String(n).padStart(2, "0");
+					if ((e.target as HTMLElement).closest("button")) return;
 					onSlotClick(`${dateStr}T${pad(h)}:${pad(m)}:00`);
 				}}
 				role="gridcell"
@@ -169,7 +187,7 @@
 					<button
 						draggable="true"
 						ondragstart={(e) => { e.stopPropagation(); dragInst = inst; e.dataTransfer!.effectAllowed = "move"; }}
-						onclick={(e) => { e.stopPropagation(); onEventClick(inst, (e.currentTarget as HTMLElement).getBoundingClientRect()); }}
+						onclick={(e) => handleEventClick(inst, e)}
 						class="absolute rounded px-2 py-0.5 text-left text-sm text-white overflow-hidden hover:opacity-90 transition-opacity cursor-pointer"
 						style="
 							top: {top}px;

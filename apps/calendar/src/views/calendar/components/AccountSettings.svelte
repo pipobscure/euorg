@@ -53,6 +53,26 @@
 
 	function selectAccount(id: string) { selectedAccountId = id; mode = "view"; }
 
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === "Escape") {
+			e.stopPropagation();
+			if (mode !== "view") {
+				mode = "view"; // go back from add form instead of closing
+			} else {
+				onClose();
+			}
+		} else if (e.key === "Enter") {
+			const tag = (e.target as HTMLElement)?.tagName;
+			if (tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+			e.preventDefault();
+			e.stopPropagation();
+			if (mode === "addDav") handleAddDav();
+			else if (mode === "addSmtp") handleAddSmtp();
+			else if (mode === "addSubscription") handleAddSubscription();
+			else if (mode === "view" && selectedAccount?.accountType === "smtp") handleSaveSmtp();
+		}
+	}
+
 	function pushChanges() {
 		onAccountsChange([...localAccounts], [...localCalendars]);
 	}
@@ -258,7 +278,14 @@
 <div class="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true">
 	<button class="absolute inset-0 bg-black/40" onclick={onClose} aria-label="Close settings"></button>
 
-	<div class="relative z-10 flex h-full w-[520px] flex-col bg-surface-50-950 shadow-2xl border-l border-surface-200-800">
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div
+		class="relative z-10 flex h-full w-[520px] flex-col bg-surface-50-950 shadow-2xl border-l border-surface-200-800"
+		onkeydown={handleKeydown}
+		role="dialog"
+		aria-modal="true"
+		tabindex="-1"
+	>
 		<!-- Header -->
 		<div class="flex items-center justify-between border-b border-surface-200-800 px-5 py-4 shrink-0">
 			<h2 class="text-base font-semibold text-surface-900-100">Settings</h2>
@@ -292,24 +319,6 @@
 		<!-- Tab content -->
 		{#if activeTab === "prefs"}
 			<div class="flex-1 overflow-y-auto p-5 space-y-6">
-				<!-- Week numbers -->
-				<div class="flex items-center justify-between rounded-lg border border-surface-200-800 bg-surface-100-900 px-4 py-3">
-					<div>
-						<p class="text-sm font-medium text-surface-900-100">Show week numbers</p>
-						<p class="text-xs text-surface-500-400">ISO 8601 week number in all views</p>
-					</div>
-					<button
-						role="switch"
-						aria-checked={prefs.showWeekNumbers}
-						onclick={() => setPref("showWeekNumbers", !prefs.showWeekNumbers)}
-						class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors
-							{prefs.showWeekNumbers ? 'bg-primary-500' : 'bg-surface-300-700'}"
-					>
-						<span class="pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow ring-0 transition-transform
-							{prefs.showWeekNumbers ? 'translate-x-5' : 'translate-x-0'}" />
-					</button>
-				</div>
-
 				<!-- Start of week -->
 				<div class="space-y-1.5">
 					<label class="text-sm font-medium text-surface-700-300">Start of week</label>

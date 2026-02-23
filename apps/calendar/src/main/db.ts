@@ -180,6 +180,9 @@ export class CalendarDB {
         recurrence_id   TEXT,
         status          TEXT    NOT NULL DEFAULT '',
         organizer       TEXT    NOT NULL DEFAULT '',
+        description     TEXT    NOT NULL DEFAULT '',
+        location        TEXT    NOT NULL DEFAULT '',
+        attendees_text  TEXT    NOT NULL DEFAULT '',
         last_synced     INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (uid, recurrence_id)
       );
@@ -191,6 +194,9 @@ export class CalendarDB {
 		try { this.db.exec("ALTER TABLE events ADD COLUMN dtstart_utc TEXT"); } catch {}
 		try { this.db.exec("ALTER TABLE events ADD COLUMN dtend_utc TEXT"); } catch {}
 		try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_dtstart_utc ON events (dtstart_utc)"); } catch {}
+		try { this.db.exec("ALTER TABLE events ADD COLUMN description TEXT NOT NULL DEFAULT ''"); } catch {}
+		try { this.db.exec("ALTER TABLE events ADD COLUMN location TEXT NOT NULL DEFAULT ''"); } catch {}
+		try { this.db.exec("ALTER TABLE events ADD COLUMN attendees_text TEXT NOT NULL DEFAULT ''"); } catch {}
 	}
 
 	// ── Queries ────────────────────────────────────────────────────────────────
@@ -273,6 +279,22 @@ export class CalendarDB {
 		return stmt.get(uid) ?? null;
 	}
 
+	/** Full-text search across summary, description, location, organizer, attendees.
+	 *  Returns up to 20 most-recent matching events. */
+	searchEvents(query: string): Array<{ uid: string; recurrenceId: string | null; summary: string; dtstartUtc: string; calendarId: string; accountId: string }> {
+		const q = `%${query.toLowerCase()}%`;
+		return this.db.query(`
+      SELECT uid, recurrence_id as recurrenceId, summary, dtstart_utc as dtstartUtc,
+             calendar_id as calendarId, account_id as accountId
+      FROM events
+      WHERE dtstart_utc IS NOT NULL
+        AND (lower(summary) LIKE ? OR lower(description) LIKE ? OR lower(location) LIKE ?
+             OR lower(organizer) LIKE ? OR lower(attendees_text) LIKE ?)
+      ORDER BY dtstart_utc DESC
+      LIMIT 20
+    `).all(q, q, q, q, q) as any[];
+	}
+
 	/** Get ETag map { href → etag } for a specific calendar (for sync diffing). */
 	getEtags(calendarId: string): Map<string, string> {
 		const stmt = this.db.prepare<{ href: string; etag: string }, string>(`
@@ -325,12 +347,13 @@ export class CalendarDB {
 				.run(event.uid, href);
 		}
 
+		const attendeesText = event.attendees.map((a) => `${a.cn} ${a.email}`).join(' ');
 		const stmt = this.db.prepare(`
       INSERT INTO events
         (uid, account_id, calendar_id, etag, href, ics_path, summary, dtstart, dtend,
          dtstart_utc, dtend_utc, dtstart_is_date, rrule, exdates, recurrence_id,
-         status, organizer, last_synced)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         status, organizer, description, location, attendees_text, last_synced)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (uid, recurrence_id) DO UPDATE SET
         account_id = excluded.account_id,
         calendar_id = excluded.calendar_id,
@@ -347,6 +370,9 @@ export class CalendarDB {
         exdates = excluded.exdates,
         status = excluded.status,
         organizer = excluded.organizer,
+        description = excluded.description,
+        location = excluded.location,
+        attendees_text = excluded.attendees_text,
         last_synced = excluded.last_synced
     `);
 		stmt.run(
@@ -367,6 +393,9 @@ export class CalendarDB {
 			event.recurrenceId ?? null,
 			event.status,
 			event.organizer,
+			event.description,
+			event.location,
+			attendeesText,
 			Date.now(),
 		);
 		return event.uid;
