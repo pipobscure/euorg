@@ -147,12 +147,48 @@
 
 	// ── Keyboard shortcuts ────────────────────────────────────────────────────
 	function handleKeydown(e: KeyboardEvent) {
-		if (!e.ctrlKey) return;
-		// Do not fire when a modal is open or focus is in a text field
-		if (showEditor || showAccountSettings || showImport || showDuplicatePanel) return;
-		if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-		if (e.key === "n") { e.preventDefault(); openNewContact(); }
-		if (e.key === "e" && selectedUid) { e.preventDefault(); openEditorForUid(selectedUid); }
+		const inInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+		const anyModalOpen = showEditor || showAccountSettings || showImport || showDuplicatePanel;
+
+		// Escape: close overlays in priority order (works even inside modals, which add their own handlers)
+		if (e.key === "Escape" && !e.ctrlKey) {
+			if (contextMenu) { contextMenu = null; return; }
+			// Other modals handle their own Escape via svelte:window
+			return;
+		}
+
+		// Ctrl shortcuts
+		if (e.ctrlKey || e.metaKey) {
+			if (anyModalOpen) return;
+			if (inInput) return;
+			switch (e.key) {
+				case "n": e.preventDefault(); openNewContact(); break;
+				case "e": if (selectedUid) { e.preventDefault(); openEditorForUid(selectedUid); } break;
+				case ",": e.preventDefault(); showAccountSettings = true; break;
+			}
+			return;
+		}
+
+		// Plain keys: only when no modal open and not in an input
+		if (anyModalOpen || inInput) return;
+
+		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+			if (contacts.length === 0) return;
+			e.preventDefault();
+			const idx = contacts.findIndex((c) => c.uid === selectedUid);
+			if (e.key === "ArrowDown") {
+				const next = idx === -1 ? 0 : Math.min(idx + 1, contacts.length - 1);
+				selectContact(contacts[next].uid);
+			} else {
+				const prev = idx === -1 ? contacts.length - 1 : Math.max(idx - 1, 0);
+				selectContact(contacts[prev].uid);
+			}
+		}
+
+		if (e.key === "Delete" && selectedUid) {
+			e.preventDefault();
+			deleteContactByUid(selectedUid);
+		}
 	}
 
 	// ── Sync ───────────────────────────────────────────────────────────────────

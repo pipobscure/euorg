@@ -54,6 +54,18 @@
 	let saving = $state(false);
 	let error = $state("");
 
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === "Escape") {
+			e.stopPropagation();
+			onCancel();
+		} else if (e.key === "Enter" && !e.shiftKey && !saving) {
+			const tag = (e.target as HTMLElement)?.tagName;
+			if (tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+			e.preventDefault();
+			save();
+		}
+	}
+
 	async function save() {
 		saving = true;
 		error = "";
@@ -91,6 +103,8 @@
 		}
 	}
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <!-- Modal overlay -->
 <div

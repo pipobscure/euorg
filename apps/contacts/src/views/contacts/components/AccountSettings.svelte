@@ -143,6 +143,8 @@
 	}
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === "Escape") onClose(); }} />
+
 <!-- Drawer overlay -->
 <div
 	class="fixed inset-0 z-40 flex justify-end"

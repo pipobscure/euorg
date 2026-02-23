@@ -48,6 +48,8 @@
 	}
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === "Escape" && !importing) onClose(); }} />
+
 <div
 	class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
 	role="dialog"
