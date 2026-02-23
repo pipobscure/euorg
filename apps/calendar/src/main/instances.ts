@@ -184,14 +184,14 @@ function rowToInstance(
 	};
 }
 
-/** Get description and location from raw ICS (expensive, only for detail view) */
-export function getEventDetail(row: EventRow): { description: string; location: string } {
+/** Get description, location, and url from raw ICS (expensive, only for detail view) */
+export function getEventDetail(row: EventRow): { description: string; location: string; url: string } {
 	const ics = readICS(row.icsPath);
-	if (!ics) return { description: "", location: "" };
+	if (!ics) return { description: "", location: "", url: "" };
 	const obj = parseICS(ics);
 	const ev = obj.events.find((e) => e.uid === row.uid);
-	if (!ev) return { description: "", location: "" };
-	return { description: ev.description, location: ev.location };
+	if (!ev) return { description: "", location: "", url: "" };
+	return { description: ev.description, location: ev.location, url: ev.url };
 }
 
 // ── Main Query Function ───────────────────────────────────────────────────────
@@ -270,8 +270,18 @@ export function getInstancesInRange(
 
 		// Expand RRULE
 		const expanded: Temporal.ZonedDateTime[] = [];
+		const expandedDates: Temporal.PlainDate[] = [];
 		if (dtstart instanceof Temporal.PlainDate) {
-			// All-day recurring: skip for now, treat as date-only
+			// All-day recurring: expand as PlainDates
+			const zdtList = expandRRule(
+				row.rrule!,
+				dtstart,
+				rangeStart,
+				rangeEnd,
+				rawExdates,
+				tzidForExpansion,
+			);
+			expandedDates.push(...zdtList.map((zdt) => zdt.toPlainDate()));
 		} else {
 			const zdtList = expandRRule(
 				row.rrule!,
@@ -289,7 +299,37 @@ export function getInstancesInRange(
 		// Build a set of overridden recurrence IDs (normalized)
 		const overriddenKeys = new Set<string>(overrides.map((ov) => ov.recurrenceId ?? ""));
 
-		// Emit expanded instances, skipping those with overrides
+		// Emit all-day expanded instances
+		for (const pd of expandedDates) {
+			const pad = (n: number, l = 2) => String(n).padStart(l, "0");
+			const key = `${pad(pd.year, 4)}${pad(pd.month)}${pad(pd.day)}`;
+			if (overriddenKeys.has(key)) continue;
+
+			const startISO = pd.toString(); // "2026-11-18"
+			const endISO = pd.add({ days: 1 }).toString();
+			instances.push({
+				instanceId: `${row.uid}__${startISO}`,
+				uid: row.uid,
+				calendarId: row.calendarId,
+				accountId: row.accountId,
+				summary: row.summary,
+				description: "",
+				location: "",
+				organizer: row.organizer,
+				startISO,
+				endISO,
+				isAllDay: true,
+				color: cal.color,
+				hasRRule: true,
+				recurrenceId: null,
+				etag: row.etag,
+				href: row.href,
+				icsPath: row.icsPath,
+				status: row.status,
+			});
+		}
+
+		// Emit timed expanded instances, skipping those with overrides
 		for (const zdt of expanded) {
 			const key = zdtToExdateKeyStr(zdt);
 			if (overriddenKeys.has(key)) continue; // handled by override row below
@@ -300,7 +340,7 @@ export function getInstancesInRange(
 				const masterEnd = parseDtstart(masterEvent.dtend, masterEvent.dtendTzid, false);
 				if (masterEnd instanceof Temporal.ZonedDateTime) {
 					// Use since() to get a Duration without BigInt arithmetic
-					const dur = masterEnd.since(dtstart, { largestUnit: "hours" });
+					const dur = masterEnd.since(dtstart as Temporal.ZonedDateTime, { largestUnit: "hours" });
 					end = zdt.add(dur);
 				} else {
 					end = zdt.add({ hours: 1 });
@@ -366,7 +406,14 @@ export function getInstancesInRange(
 	// Sort by startISO
 	instances.sort((a, b) => a.startISO.localeCompare(b.startISO));
 
-	return instances;
+	// Deduplicate by instanceId (guards against server-side UID collisions
+	// and SQLite NULL primary key quirks allowing duplicate non-override rows)
+	const seen = new Set<string>();
+	return instances.filter((inst) => {
+		if (seen.has(inst.instanceId)) return false;
+		seen.add(inst.instanceId);
+		return true;
+	});
 }
 
 function zdtToExdateKeyStr(zdt: Temporal.ZonedDateTime): string {

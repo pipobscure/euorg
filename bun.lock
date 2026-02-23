@@ -20,6 +20,7 @@
       "dependencies": {
         "@euorg/shared": "workspace:*",
         "@js-temporal/polyfill": "^0.5.1",
+        "@pipobscure/xml": "^1.0.3",
         "electrobun": "1.13.1",
         "nodemailer": "^8.0.1",
       },
@@ -32,6 +33,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@euorg/shared": "workspace:*",
+        "@pipobscure/xml": "^1.0.3",
         "electrobun": "1.13.1",
       },
     },
@@ -84,6 +86,8 @@
     "@js-temporal/polyfill": ["@js-temporal/polyfill@0.5.1", "", { "dependencies": { "jsbi": "^4.3.0" } }, "sha512-hloP58zRVCRSpgDxmqCWJNlizAlUgJFqG2ypq79DCvyv9tHjRYMDOcPFjzfl/A1/YxDvRCZz8wvZvmapQnKwFQ=="],
 
     "@malept/cross-spawn-promise": ["@malept/cross-spawn-promise@1.1.1", "", { "dependencies": { "cross-spawn": "^7.0.1" } }, "sha512-RTBGWL5FWQcg9orDOCcp4LvItNzUPcyEU9bwaeJX0rJ1IQxzucC48Y0/sQLp/g6t99IQgAlGIaesJS+gTn7tVQ=="],
+
+    "@pipobscure/xml": ["@pipobscure/xml@1.0.3", "", {}, "sha512-HN7h2ev+DBT7G+8j5aQAmI2Klm6CGsGTyORVa60qn0KllbNXnH23aB/+zmbNfU4boLQ3B6EjvYwZY3MFsvB7tA=="],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 

@@ -92,6 +92,7 @@ export interface EventInput {
 	summary: string;
 	description?: string;
 	location?: string;
+	url?: string;
 	startISO: string;
 	endISO: string;
 	isAllDay: boolean;

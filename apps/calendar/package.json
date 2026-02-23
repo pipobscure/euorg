@@ -10,6 +10,7 @@
 	"dependencies": {
 		"@euorg/shared": "workspace:*",
 		"@js-temporal/polyfill": "^0.5.1",
+		"@pipobscure/xml": "^1.0.3",
 		"electrobun": "1.13.1",
 		"nodemailer": "^8.0.1"
 	},

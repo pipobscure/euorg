@@ -4,6 +4,13 @@
  * All HTTP via Bun's built-in fetch. Basic auth only.
  */
 
+import { parse, descendants, descendant, child, textContent, type Element } from "@pipobscure/xml";
+
+// ── Namespaces ────────────────────────────────────────────────────────────────
+
+const DAV = "DAV:";
+const CARD = "urn:ietf:params:xml:ns:carddav";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface CardDAVCredentials {
@@ -37,60 +44,54 @@ function resolveUrl(base: string, href: string): string {
 	return new URL(href, base).toString();
 }
 
-/** Extract text content of the first tag matching name in XML string */
-function extractTag(xml: string, tag: string): string | null {
-	// handles namespaced tags: <d:tagname> or <tagname>
-	const re = new RegExp(`<[^>]*:?${tag}[^>]*>([\\s\\S]*?)<\/[^>]*:?${tag}>`, "i");
-	const m = xml.match(re);
-	return m ? m[1].trim() : null;
+// ── XML Parsing Helpers ───────────────────────────────────────────────────────
+
+/** Parse a 207 Multi-Status response and return all <response> elements */
+function parseResponses(xml: string): Element[] {
+	return descendants(parse(xml), "response", DAV);
 }
 
-/** Extract all occurrences of a tag, return array of inner text */
-function extractAllTags(xml: string, tag: string): string[] {
-	const re = new RegExp(`<[^>]*:?${tag}[^>]*>([\\s\\S]*?)<\/[^>]*:?${tag}>`, "gi");
-	const results: string[] = [];
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(xml)) !== null) {
-		results.push(m[1].trim());
-	}
-	return results;
+function getHref(response: Element): string {
+	return textContent(child(response, "href", DAV));
 }
 
-/** Split a 207 Multi-Status response into individual <response> blocks */
-function splitResponses(xml: string): string[] {
-	return extractAllTags(xml, "response");
+function getEtag(response: Element): string {
+	return textContent(descendant(response, "getetag", DAV)).replace(/^"|"$/g, "");
 }
 
-/** Extract href from a response block */
-function extractHref(block: string): string {
-	return extractTag(block, "href") ?? "";
+function getDisplayName(response: Element): string {
+	return textContent(descendant(response, "displayname", DAV));
 }
 
-/** Extract ETag (strip quotes) */
-function extractEtag(block: string): string {
-	const raw = extractTag(block, "getetag") ?? "";
-	return raw.replace(/^"|"$/g, "");
+/** Check if resourcetype contains an <addressbook> element */
+function isAddressbook(response: Element): boolean {
+	return !!descendant(response, "addressbook", CARD);
 }
 
-/** Extract display name */
-function extractDisplayName(block: string): string {
-	return extractTag(block, "displayname") ?? "";
+/** Check if the response represents a vCard resource (not a collection) */
+function isVCard(response: Element): boolean {
+	const ct = textContent(descendant(response, "getcontenttype", DAV));
+	const href = getHref(response);
+	return ct.includes("vcard") || (href.endsWith(".vcf") && !isAddressbook(response));
 }
 
-/** Extract address-data (vCard text) */
-function extractAddressData(block: string): string {
-	return extractTag(block, "address-data") ?? "";
+/** Find the current-user-principal URL from a PROPFIND response */
+function findPrincipalUrl(xml: string, base: string): string | null {
+	const doc = parse(xml);
+	const el =
+		descendant(doc, "current-user-principal", DAV) ?? descendant(doc, "principal-URL", DAV);
+	if (!el) return null;
+	const href = textContent(child(el, "href", DAV));
+	return href ? resolveUrl(base, href) : null;
 }
 
-/** Check if a response block has resourcetype containing addressbook */
-function isAddressbook(block: string): boolean {
-	return block.toLowerCase().includes("addressbook");
-}
-
-/** Check if a response block represents a vCard (not a collection) */
-function isVCard(block: string): boolean {
-	const ct = extractTag(block, "getcontenttype") ?? "";
-	return ct.includes("vcard") || (extractHref(block).endsWith(".vcf") && !isAddressbook(block));
+/** Find the addressbook-home-set URL */
+function findHomeSetUrl(xml: string, base: string): string | null {
+	const doc = parse(xml);
+	const el = descendant(doc, "addressbook-home-set", CARD);
+	if (!el) return null;
+	const href = textContent(child(el, "href", DAV));
+	return href ? resolveUrl(base, href) : null;
 }
 
 // ── Service Discovery ─────────────────────────────────────────────────────────
@@ -138,21 +139,6 @@ async function propfind(
 	return { xml, status: res.status };
 }
 
-/** Find the current-user-principal URL from a PROPFIND response */
-function findPrincipalUrl(xml: string, base: string): string | null {
-	// <d:current-user-principal><d:href>/principals/user/</d:href></d:current-user-principal>
-	const inner = extractTag(xml, "current-user-principal") ?? extractTag(xml, "principal-URL") ?? "";
-	const href = extractTag(inner, "href");
-	return href ? resolveUrl(base, href) : null;
-}
-
-/** Find the addressbook-home-set URL */
-function findHomeSetUrl(xml: string, base: string): string | null {
-	const inner = extractTag(xml, "addressbook-home-set") ?? "";
-	const href = extractTag(inner, "href");
-	return href ? resolveUrl(base, href) : null;
-}
-
 export async function discoverCollections(creds: CardDAVCredentials): Promise<RemoteCollection[]> {
 	const auth = basicAuth(creds.username, creds.password);
 	const baseUrl = creds.serverUrl.replace(/\/$/, "");
@@ -189,17 +175,16 @@ export async function discoverCollections(creds: CardDAVCredentials): Promise<Re
 
 	// Step 3: List collections under home set
 	const { xml } = await propfind(homeSetUrl, PROPFIND_COLLECTIONS, auth, "1");
-	const blocks = splitResponses(xml);
 	const collections: RemoteCollection[] = [];
 
-	for (const block of blocks) {
-		if (!isAddressbook(block)) continue;
-		const href = extractHref(block);
+	for (const response of parseResponses(xml)) {
+		if (!isAddressbook(response)) continue;
+		const href = getHref(response);
 		if (!href) continue;
 		const url = resolveUrl(baseUrl, href);
 		// Skip if the URL equals the home set itself (it reports itself as addressbook-home-set)
 		if (url === homeSetUrl) continue;
-		const name = extractDisplayName(block) || url.split("/").filter(Boolean).pop() || "Addressbook";
+		const name = getDisplayName(response) || url.split("/").filter(Boolean).pop() || "Addressbook";
 		const id = btoa(url).replace(/=/g, "");
 		collections.push({ id, url, name });
 	}
@@ -234,11 +219,11 @@ export async function listEtags(
 	});
 	const xml = await res.text();
 	const map = new Map<string, string>();
-	for (const block of splitResponses(xml)) {
-		const href = extractHref(block);
-		const etag = extractEtag(block);
+	for (const response of parseResponses(xml)) {
+		const href = getHref(response);
+		const etag = getEtag(response);
 		// Only include actual vCards (skip collection itself)
-		if (href && (etag || isVCard(block))) {
+		if (href && (etag || isVCard(response))) {
 			map.set(href, etag);
 		}
 	}

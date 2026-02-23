@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { onMount } from "svelte";
 	import type { EventInstance, CalendarView, EventInput, RecurringEditScope } from "../lib/types.ts";
 	import { toDateStr, parseISO } from "../lib/types.ts";
+	import { rpc } from "../lib/rpc.ts";
+	import DatePicker from "./DatePicker.svelte";
 
 	interface Props {
 		instance: EventInstance | null; // null = new event
@@ -37,11 +40,18 @@
 	}
 
 	let summary = $state(instance?.summary ?? "");
-	let description = $state(instance?.description ?? "");
-	let location = $state(instance?.location ?? "");
+	let description = $state("");
+	let location = $state("");
+	let url = $state("");
 	let isAllDay = $state(instance?.isAllDay ?? false);
-	let startValue = $state(defaultStart());
-	let endValue = $state(defaultEnd());
+
+	// Split date/time into separate fields for better UX
+	const _defaultStart = defaultStart();
+	const _defaultEnd = defaultEnd();
+	let startDate = $state(_defaultStart.slice(0, 10));
+	let startTime = $state(_defaultStart.slice(11, 16));
+	let endDate = $state(_defaultEnd.slice(0, 10));
+	let endTime = $state(_defaultEnd.slice(11, 16));
 	let calendarId = $state(instance?.calendarId ?? defaultCalendarId);
 	let rrulePreset = $state<string>(extractRrulePreset(instance));
 	let customRrule = $state<string>("");
@@ -59,7 +69,7 @@
 		switch (rrulePreset) {
 			case "daily": return "FREQ=DAILY";
 			case "weekly": {
-				const d = parseISO(startValue);
+				const d = parseISO(startDate);
 				const days = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 				return `FREQ=WEEKLY;BYDAY=${days[d.getDay()]}`;
 			}
@@ -77,8 +87,9 @@
 			summary: summary.trim(),
 			description: description.trim() || undefined,
 			location: location.trim() || undefined,
-			startISO: isAllDay ? startValue.slice(0, 10) : startValue + ":00",
-			endISO: isAllDay ? endValue.slice(0, 10) : endValue + ":00",
+			url: url.trim() || undefined,
+			startISO: isAllDay ? startDate : `${startDate}T${startTime}:00`,
+			endISO: isAllDay ? endDate : `${endDate}T${endTime}:00`,
 			isAllDay,
 			tzid: isAllDay ? undefined : displayTzid,
 			rrule: buildRrule(),
@@ -94,13 +105,29 @@
 	function removeAttendee(i: number) {
 		attendees = attendees.filter((_, idx) => idx !== i);
 	}
+
+	// Load description, location, and url from ICS when editing an existing event
+	onMount(async () => {
+		if (instance) {
+			try {
+				const detail = await rpc.request.getEventDetail({ uid: instance.uid });
+				if (detail) {
+					description = detail.description;
+					location = detail.location;
+					url = detail.url;
+				}
+			} catch {
+				// leave empty
+			}
+		}
+	});
 </script>
 
 <!-- Modal backdrop -->
 <div class="fixed inset-0 z-40 bg-black/40" onclick={onCancel} role="dialog" aria-modal="true" />
 
 <!-- Modal -->
-<div class="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-surface-200-800 bg-surface-50-950 shadow-2xl">
+<div class="fixed inset-0 m-auto z-50 w-full max-w-lg h-fit rounded-2xl border border-surface-200-800 bg-surface-50-950 shadow-2xl">
 	<!-- Header -->
 	<div class="flex items-center justify-between border-b border-surface-200-800 px-6 py-4">
 		<h2 class="text-base font-semibold text-surface-900-100">
@@ -167,18 +194,16 @@
 			<!-- Date/time -->
 			<div class="flex items-center gap-3">
 				<label class="w-20 shrink-0 text-sm text-surface-600-400">Start</label>
-				{#if isAllDay}
-					<input type="date" bind:value={startValue} class="input text-sm py-1.5" />
-				{:else}
-					<input type="datetime-local" bind:value={startValue} class="input text-sm py-1.5" />
+				<DatePicker bind:value={startDate} class="flex-1" />
+				{#if !isAllDay}
+					<input type="time" bind:value={startTime} class="input text-sm py-1.5 w-28" />
 				{/if}
 			</div>
 			<div class="flex items-center gap-3">
 				<label class="w-20 shrink-0 text-sm text-surface-600-400">End</label>
-				{#if isAllDay}
-					<input type="date" bind:value={endValue} class="input text-sm py-1.5" />
-				{:else}
-					<input type="datetime-local" bind:value={endValue} class="input text-sm py-1.5" />
+				<DatePicker bind:value={endDate} class="flex-1" />
+				{#if !isAllDay}
+					<input type="time" bind:value={endTime} class="input text-sm py-1.5 w-28" />
 				{/if}
 			</div>
 
@@ -186,6 +211,12 @@
 			<div class="flex items-center gap-3">
 				<label class="w-20 shrink-0 text-sm text-surface-600-400">Location</label>
 				<input type="text" bind:value={location} placeholder="Add location" class="input flex-1 text-sm py-1.5" />
+			</div>
+
+			<!-- Meeting URL -->
+			<div class="flex items-center gap-3">
+				<label class="w-20 shrink-0 text-sm text-surface-600-400">Meeting URL</label>
+				<input type="url" bind:value={url} placeholder="https://zoom.us/j/… or meet.google.com/…" class="input flex-1 text-sm py-1.5" />
 			</div>
 
 			<!-- Recurrence -->

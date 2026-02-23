@@ -9,6 +9,7 @@
 	},
 	"dependencies": {
 		"@euorg/shared": "workspace:*",
+		"@pipobscure/xml": "^1.0.3",
 		"electrobun": "1.13.1"
 	}
 }

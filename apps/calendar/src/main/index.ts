@@ -144,6 +144,7 @@ interface EventInput {
 	summary: string;
 	description?: string;
 	location?: string;
+	url?: string;
 	startISO: string;
 	endISO: string;
 	isAllDay: boolean;
@@ -194,7 +195,12 @@ interface CalendarRPCSchema extends ElectrobunRPCSchema {
 			getEventIcs: { params: { uid: string }; response: string | null };
 			getEventDetail: {
 				params: { uid: string };
-				response: { description: string; location: string } | null;
+				response: { description: string; location: string; url: string } | null;
+			};
+			openExternal: { params: { url: string }; response: void };
+			getTravelInfo: {
+				params: { address: string };
+				response: { minutes: number; originLat: number; originLon: number; destLat: number; destLon: number } | null;
 			};
 			createEvent: { params: { input: EventInput }; response: { uid: string } };
 			updateEvent: {
@@ -298,6 +304,48 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 				return getEventDetail(row);
 			},
 
+			async openExternal({ url }) {
+				const cmd =
+					process.platform === "win32" ? ["cmd", "/c", "start", url]
+					: process.platform === "darwin" ? ["open", url]
+					: ["xdg-open", url];
+				Bun.spawn(cmd);
+			},
+
+			async getTravelInfo({ address }) {
+				try {
+					// Geocode destination via Nominatim
+					const geoRes = await fetch(
+						`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`,
+						{ headers: { "User-Agent": "euorg-calendar/1.0 (contact: pip@pipobscure.com)" } },
+					);
+					const geoData = await geoRes.json() as Array<{ lat: string; lon: string }>;
+					if (!geoData.length) return null;
+					const destLat = parseFloat(geoData[0].lat);
+					const destLon = parseFloat(geoData[0].lon);
+
+					// Approximate user location via IP geolocation
+					const ipRes = await fetch("https://ip-api.com/json/");
+					const ipData = await ipRes.json() as { lat: number; lon: number; status: string };
+					if (ipData.status !== "success") return null;
+					const originLat = ipData.lat;
+					const originLon = ipData.lon;
+
+					// Driving route via OSRM public API
+					const routeRes = await fetch(
+						`https://router.project-osrm.org/route/v1/driving/${originLon},${originLat};${destLon},${destLat}?overview=false`,
+						{ headers: { "User-Agent": "euorg-calendar/1.0" } },
+					);
+					const routeData = await routeRes.json() as { routes: Array<{ duration: number }>; code: string };
+					if (routeData.code !== "Ok" || !routeData.routes.length) return null;
+
+					const minutes = Math.round(routeData.routes[0].duration / 60);
+					return { minutes, originLat, originLon, destLat, destLon };
+				} catch {
+					return null;
+				}
+			},
+
 			async createEvent({ input }) {
 				const cfg = readAccounts();
 				let accountId = "";
@@ -312,6 +360,7 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 					...input,
 					description: input.description,
 					location: input.location,
+					url: input.url,
 					rrule: input.rrule,
 					attendees: input.attendees,
 				}, input.calendarId, accountId);
@@ -320,24 +369,40 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 			},
 
 			async updateEvent({ uid, input, scope, instanceStartISO }) {
-				await writeUpdate(db, uid, {
-					...input,
-					description: input.description,
-					location: input.location,
-					rrule: input.rrule,
-					attendees: input.attendees,
-				}, scope, instanceStartISO);
-				rpc.send("eventChanged", { uid, action: "updated" });
+				try {
+					await writeUpdate(db, uid, {
+						...input,
+						description: input.description,
+						location: input.location,
+						url: input.url,
+						rrule: input.rrule,
+						attendees: input.attendees,
+					}, scope, instanceStartISO);
+					rpc.send("eventChanged", { uid, action: "updated" });
+				} catch (e) {
+					console.error("[calendar] updateEvent failed:", e instanceof Error ? e.message : e);
+					throw e;
+				}
 			},
 
 			async deleteEvent({ uid, scope, instanceStartISO }) {
-				await writeDelete(db, uid, scope, instanceStartISO);
-				rpc.send("eventChanged", { uid, action: "deleted" });
+				try {
+					await writeDelete(db, uid, scope, instanceStartISO);
+					rpc.send("eventChanged", { uid, action: "deleted" });
+				} catch (e) {
+					console.error("[calendar] deleteEvent failed:", e instanceof Error ? e.message : e);
+					throw e;
+				}
 			},
 
 			async rescheduleEvent({ uid, instanceStartISO, newStartISO, scope }) {
-				await writeReschedule(db, uid, instanceStartISO, newStartISO, scope);
-				rpc.send("eventChanged", { uid, action: "updated" });
+				try {
+					await writeReschedule(db, uid, instanceStartISO, newStartISO, scope);
+					rpc.send("eventChanged", { uid, action: "updated" });
+				} catch (e) {
+					console.error("[calendar] rescheduleEvent failed:", e instanceof Error ? e.message : e);
+					throw e;
+				}
 			},
 
 			async getAccounts() {
