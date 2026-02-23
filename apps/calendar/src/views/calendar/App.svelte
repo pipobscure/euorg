@@ -335,6 +335,7 @@
 				<MonthView
 					{instances}
 					{navDate}
+					{displayTzid}
 					{calendars}
 					startOfWeek={prefs.startOfWeek}
 					showWeekNumbers={prefs.showWeekNumbers}
@@ -386,6 +387,7 @@
 	<EventPopover
 		instance={popoverInstance}
 		anchor={popoverAnchor}
+		{displayTzid}
 		onEdit={() => openEditEvent(popoverInstance!)}
 		onDelete={(scope, instanceStartISO) => handleDeleteEvent(popoverInstance!.uid, scope, instanceStartISO)}
 		onClose={closePopover}

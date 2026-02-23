@@ -2,6 +2,7 @@
  * Shared types for the calendar webview.
  * Mirrors main-process structures; kept in sync manually.
  */
+import { Temporal } from "@js-temporal/polyfill";
 
 export type ViewMode = "day" | "week" | "month";
 export type RecurringEditScope = "this" | "thisAndFollowing" | "all";
@@ -206,22 +207,25 @@ export function parseISO(s: string): Date {
 	return new Date(s.replace(/\[.*\]$/, ""));
 }
 
-/** Get minutes from midnight for a datetime string */
-export function minutesFromMidnight(s: string): number {
-	const d = parseISO(s);
-	return d.getHours() * 60 + d.getMinutes();
+/** Get minutes from midnight for a datetime string in the given display timezone.
+ *  Parses the instant from the ISO string and re-interprets it in the display
+ *  timezone, so the result is always correct regardless of UTC offset or Z suffix. */
+export function minutesFromMidnight(s: string, tzid: string): number {
+	if (s.indexOf("T") === -1) return 0;
+	const pdt = Temporal.Instant.from(s).toZonedDateTimeISO(tzid).toPlainDateTime();
+	return pdt.hour * 60 + pdt.minute;
 }
 
-/** Format time as "09:30" */
-export function formatTime(s: string): string {
-	const d = parseISO(s);
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+/** Format time as "09:30" in the given display timezone. */
+export function formatTime(s: string, tzid: string): string {
+	if (s.indexOf("T") === -1) return "";
+	const pdt = Temporal.Instant.from(s).toZonedDateTimeISO(tzid).toPlainDateTime();
+	return `${String(pdt.hour).padStart(2, "0")}:${String(pdt.minute).padStart(2, "0")}`;
 }
 
 /** Format event time range: "9:00 – 10:30" */
-export function formatTimeRange(startISO: string, endISO: string): string {
-	return `${formatTime(startISO)} – ${formatTime(endISO)}`;
+export function formatTimeRange(startISO: string, endISO: string, tzid: string): string {
+	return `${formatTime(startISO, tzid)} – ${formatTime(endISO, tzid)}`;
 }
 
 /** Get date string of an ISO datetime */

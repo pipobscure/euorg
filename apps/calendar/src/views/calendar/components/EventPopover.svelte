@@ -7,12 +7,13 @@
 	interface Props {
 		instance: EventInstance;
 		anchor: DOMRect;
+		displayTzid: string;
 		onEdit: () => void;
 		onDelete: (scope: RecurringEditScope, instanceStartISO?: string) => void;
 		onClose: () => void;
 	}
 
-	let { instance, anchor, onEdit, onDelete, onClose }: Props = $props();
+	let { instance, anchor, displayTzid, onEdit, onDelete, onClose }: Props = $props();
 
 	let popoverEl = $state<HTMLElement | null>(null);
 	let showDeleteConfirm = $state(false);
@@ -222,7 +223,7 @@
 			{#if instance.isAllDay}
 				{formatLongDate(parseISO(instance.startISO))}
 			{:else}
-				{formatLongDate(parseISO(instance.startISO))}, {formatTimeRange(instance.startISO, instance.endISO)}
+				{formatLongDate(parseISO(instance.startISO))}, {formatTimeRange(instance.startISO, instance.endISO, displayTzid)}
 			{/if}
 		</span>
 	</div>

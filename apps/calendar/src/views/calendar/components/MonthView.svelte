@@ -8,6 +8,7 @@
 	interface Props {
 		instances: EventInstance[];
 		navDate: Date;
+		displayTzid: string;
 		calendars: CalendarView[];
 		startOfWeek: "monday" | "sunday";
 		showWeekNumbers: boolean;
@@ -16,7 +17,7 @@
 		onDrop: (instanceId: string, newDate: string) => void;
 	}
 
-	let { instances, navDate, calendars, startOfWeek, showWeekNumbers, onEventClick, onDayClick, onDrop }: Props = $props();
+	let { instances, navDate, displayTzid, calendars, startOfWeek, showWeekNumbers, onEventClick, onDayClick, onDrop }: Props = $props();
 
 	const MAX_VISIBLE_EVENTS = 3;
 
@@ -161,7 +162,7 @@
 									style="background-color: {inst.color};"
 								>
 									{#if !inst.isAllDay}
-										<span class="opacity-80">{formatTime(inst.startISO)}</span>
+										<span class="opacity-80">{formatTime(inst.startISO, displayTzid)}</span>
 									{/if}
 									{inst.summary}
 								</button>

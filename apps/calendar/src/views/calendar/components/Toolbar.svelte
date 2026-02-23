@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { ViewMode } from "../lib/types.ts";
 	import {
-		getMondayOf, addDays, formatMonth, formatShortDate, formatLongDate, toDateStr, COMMON_TIMEZONES,
+		getMondayOf, addDays, formatMonth, formatShortDate, formatLongDate, COMMON_TIMEZONES,
 	} from "../lib/types.ts";
 
 	interface Props {
@@ -35,6 +35,45 @@
 		}
 		return formatMonth(navDate);
 	});
+
+	// All IANA timezones (common first, rest after)
+	const allTimezones: string[] = [
+		...COMMON_TIMEZONES,
+		...(typeof Intl !== "undefined" && "supportedValuesOf" in Intl
+			? (Intl as any).supportedValuesOf("timeZone").filter((tz: string) => !COMMON_TIMEZONES.includes(tz))
+			: []),
+	];
+
+	// Timezone combobox state
+	let tzInput = $state(displayTzid);
+	let tzOpen = $state(false);
+
+	// Keep input in sync with prop when dropdown is closed
+	$effect(() => {
+		if (!tzOpen) tzInput = displayTzid;
+	});
+
+	const filteredTzList = $derived(
+		tzInput === ""
+			? allTimezones
+			: allTimezones.filter((tz) => tz.toLowerCase().includes(tzInput.toLowerCase())),
+	);
+
+	function onTzFocus() {
+		tzInput = ""; // clear so user can start typing immediately
+		tzOpen = true;
+	}
+
+	function onTzBlur() {
+		// Delay close so onmousedown on list items fires first
+		setTimeout(() => { tzOpen = false; }, 150);
+	}
+
+	function selectTz(tz: string) {
+		onTzChange(tz);
+		tzInput = tz;
+		tzOpen = false;
+	}
 </script>
 
 <div class="flex h-12 items-center gap-2 px-3 select-none">
@@ -96,26 +135,36 @@
 
 	<div class="h-5 w-px bg-surface-200-800 mx-1" />
 
-	<!-- Timezone selector -->
+	<!-- Timezone searchable combobox -->
 	<div class="flex items-center gap-1.5">
 		<svg class="size-4 text-surface-500-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
 			<path fill-rule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-7.5-4.5a.75.75 0 0 1 .75.75v3.19l1.97.98a.75.75 0 0 1-.67 1.34l-2.5-1.25A.75.75 0 0 1 9.75 10V6.25a.75.75 0 0 1 .75-.75Z" clip-rule="evenodd"/>
 		</svg>
-		<select
-			value={displayTzid}
-			onchange={(e) => onTzChange((e.target as HTMLSelectElement).value)}
-			class="input text-xs py-1 px-2 max-w-44"
-		>
-			{#each COMMON_TIMEZONES as tz}
-				<option value={tz}>{tz}</option>
-			{/each}
-			<option disabled>───────────</option>
-			{#each (typeof Intl !== 'undefined' && 'supportedValuesOf' in Intl
-				? (Intl as any).supportedValuesOf('timeZone').filter((tz: string) => !COMMON_TIMEZONES.includes(tz))
-				: []) as tz}
-				<option value={tz}>{tz}</option>
-			{/each}
-		</select>
+		<div class="relative">
+			<input
+				type="text"
+				value={tzOpen ? tzInput : displayTzid}
+				oninput={(e) => { tzInput = (e.target as HTMLInputElement).value; }}
+				onfocus={onTzFocus}
+				onblur={onTzBlur}
+				placeholder="Search timezone…"
+				class="input text-xs py-1 px-2 w-44"
+			/>
+			{#if tzOpen}
+				<div class="absolute right-0 top-full z-50 mt-1 max-h-60 w-64 overflow-y-auto rounded-lg border border-surface-200-800 bg-surface-50-950 shadow-lg">
+					{#each filteredTzList as tz (tz)}
+						<button
+							type="button"
+							class="block w-full px-3 py-1 text-left text-xs hover:bg-surface-100-900
+								{tz === displayTzid ? 'text-primary-500 font-semibold' : ''}"
+							onmousedown={() => selectTz(tz)}
+						>{tz}</button>
+					{:else}
+						<div class="px-3 py-2 text-xs text-surface-400-600">No results</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
 	</div>
 
 	<!-- Sync + Settings -->

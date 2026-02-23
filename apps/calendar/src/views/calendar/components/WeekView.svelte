@@ -84,7 +84,7 @@
 		const columns: EventInstance[][] = [];
 
 		for (const inst of sorted) {
-			const startMin = minutesFromMidnight(inst.startISO);
+			const startMin = minutesFromMidnight(inst.startISO, displayTzid);
 			const durMin = eventDurationMinutes(inst);
 			const endMin = startMin + durMin;
 
@@ -92,7 +92,7 @@
 			for (let ci = 0; ci < columns.length; ci++) {
 				const col = columns[ci];
 				const lastInCol = col[col.length - 1];
-				if (minutesFromMidnight(lastInCol.endISO) <= startMin) {
+				if (minutesFromMidnight(lastInCol.endISO, displayTzid) <= startMin) {
 					col.push(inst);
 					layout.set(inst.instanceId, { col: ci, cols: 0 }); // cols set below
 					placed = true;
@@ -250,7 +250,7 @@
 
 					<!-- Events -->
 					{#each dayInstances as inst (inst.instanceId)}
-						{@const startMin = minutesFromMidnight(inst.startISO)}
+						{@const startMin = minutesFromMidnight(inst.startISO, displayTzid)}
 						{@const durMin = Math.max(30, eventDurationMinutes(inst))}
 						{@const pos = layout.get(inst.instanceId) ?? { col: 0, cols: 1 }}
 						{@const top = (startMin / 1440) * TOTAL_HEIGHT}
@@ -277,7 +277,7 @@
 						>
 							<div class="font-medium truncate">{inst.summary}</div>
 							{#if height > 30}
-								<div class="opacity-80 truncate">{formatTime(inst.startISO)}–{formatTime(inst.endISO)}</div>
+								<div class="opacity-80 truncate">{formatTime(inst.startISO, displayTzid)}–{formatTime(inst.endISO, displayTzid)}</div>
 							{/if}
 						</button>
 					{/each}

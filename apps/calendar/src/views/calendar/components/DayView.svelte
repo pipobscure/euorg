@@ -33,12 +33,12 @@
 		const sorted = [...evs].sort((a, b) => a.startISO.localeCompare(b.startISO));
 		const columns: EventInstance[][] = [];
 		for (const inst of sorted) {
-			const startMin = minutesFromMidnight(inst.startISO);
+			const startMin = minutesFromMidnight(inst.startISO, displayTzid);
 			let placed = false;
 			for (let ci = 0; ci < columns.length; ci++) {
 				const col = columns[ci];
 				const last = col[col.length - 1];
-				if (minutesFromMidnight(last.endISO) <= startMin) {
+				if (minutesFromMidnight(last.endISO, displayTzid) <= startMin) {
 					col.push(inst);
 					layout.set(inst.instanceId, { col: ci, cols: 0 });
 					placed = true;
@@ -160,7 +160,7 @@
 				{/each}
 
 				{#each dayInstances as inst (inst.instanceId)}
-					{@const startMin = minutesFromMidnight(inst.startISO)}
+					{@const startMin = minutesFromMidnight(inst.startISO, displayTzid)}
 					{@const durMin = Math.max(30, eventDurationMinutes(inst))}
 					{@const pos = layout.get(inst.instanceId) ?? { col: 0, cols: 1 }}
 					{@const top = (startMin / 1440) * TOTAL_HEIGHT}
@@ -182,7 +182,7 @@
 					>
 						<div class="font-medium truncate">{inst.summary}</div>
 						{#if height > 36}
-							<div class="text-xs opacity-80">{formatTime(inst.startISO)} – {formatTime(inst.endISO)}</div>
+							<div class="text-xs opacity-80">{formatTime(inst.startISO, displayTzid)} – {formatTime(inst.endISO, displayTzid)}</div>
 						{/if}
 					</button>
 				{/each}
