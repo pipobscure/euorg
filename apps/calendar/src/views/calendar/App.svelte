@@ -51,6 +51,8 @@ let searchFocusTrigger = $state(0);
 	let popoverInstance = $state<EventInstance | null>(null);
 	let popoverAnchor = $state<DOMRect | null>(null);
 
+	let focusedInstanceId = $state<string | null>(null);
+
 	let showSettings = $state(false);
 	let showImport = $state(false);
 	let importIcsText = $state<string>("");
@@ -90,6 +92,24 @@ let searchFocusTrigger = $state(0);
 		// React to loadKey changes
 		loadKey;
 		loadInstances();
+	});
+
+	// Sorted instance list for keyboard event navigation
+	const sortedInstances = $derived([...instances].sort((a, b) => a.startISO.localeCompare(b.startISO)));
+
+	// Clear focus when the focused event is no longer in the loaded range
+	$effect(() => {
+		if (focusedInstanceId && !instances.find(i => i.instanceId === focusedInstanceId)) {
+			focusedInstanceId = null;
+		}
+	});
+
+	// Scroll focused event into view when focus moves
+	$effect(() => {
+		if (focusedInstanceId) {
+			const el = document.querySelector(`[data-instance-id="${focusedInstanceId}"]`);
+			el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+		}
 	});
 
 	async function loadInstances() {
@@ -305,6 +325,60 @@ let searchFocusTrigger = $state(0);
 				case "t": e.preventDefault(); goToday(); break;
 				case "f": e.preventDefault(); searchFocusTrigger++; break;
 			}
+		} else {
+			switch (e.key) {
+				case "ArrowDown":
+				case "ArrowRight": {
+					if (sortedInstances.length === 0) break;
+					e.preventDefault();
+					closePopover();
+					if (!focusedInstanceId) {
+						focusedInstanceId = sortedInstances[0].instanceId;
+					} else {
+						const idx = sortedInstances.findIndex(i => i.instanceId === focusedInstanceId);
+						focusedInstanceId = sortedInstances[idx === -1 || idx >= sortedInstances.length - 1 ? 0 : idx + 1].instanceId;
+					}
+					break;
+				}
+				case "ArrowUp":
+				case "ArrowLeft": {
+					if (sortedInstances.length === 0) break;
+					e.preventDefault();
+					closePopover();
+					if (!focusedInstanceId) {
+						focusedInstanceId = sortedInstances[sortedInstances.length - 1].instanceId;
+					} else {
+						const idx = sortedInstances.findIndex(i => i.instanceId === focusedInstanceId);
+						focusedInstanceId = sortedInstances[idx <= 0 ? sortedInstances.length - 1 : idx - 1].instanceId;
+					}
+					break;
+				}
+				case " ": {
+					if (!focusedInstanceId) break;
+					e.preventDefault();
+					if (showPopover && popoverInstance?.instanceId === focusedInstanceId) {
+						closePopover();
+					} else {
+						const inst = instances.find(i => i.instanceId === focusedInstanceId);
+						if (!inst) break;
+						const el = document.querySelector(`[data-instance-id="${focusedInstanceId}"]`);
+						if (el) openPopover(inst, el.getBoundingClientRect());
+					}
+					break;
+				}
+				case "Enter": {
+					if (!focusedInstanceId || showPopover) break;
+					e.preventDefault();
+					const inst = instances.find(i => i.instanceId === focusedInstanceId);
+					if (inst) openEditEvent(inst);
+					break;
+				}
+				case "Escape": {
+					if (showPopover) { closePopover(); break; }
+					if (focusedInstanceId) { focusedInstanceId = null; }
+					break;
+				}
+			}
 		}
 	}
 
@@ -378,7 +452,8 @@ let searchFocusTrigger = $state(0);
 					{displayTzid}
 					{calendars}
 					startOfWeek={prefs.startOfWeek}
-						onEventClick={openPopover}
+					{focusedInstanceId}
+					onEventClick={openPopover}
 					onEventDblClick={(inst) => { navDate = parseISO(inst.startISO); viewMode = "day"; }}
 					onDayClick={(date) => openNewEvent(date)}
 					onDayDblClick={(date) => { navDate = parseISO(date); viewMode = "day"; }}
@@ -399,7 +474,8 @@ let searchFocusTrigger = $state(0);
 					startOfWeek={prefs.startOfWeek}
 					dayStart={prefs.dayStart}
 					dayEnd={prefs.dayEnd}
-						onEventClick={openPopover}
+					{focusedInstanceId}
+					onEventClick={openPopover}
 					onEventDblClick={(inst) => { navDate = parseISO(inst.startISO); viewMode = "day"; }}
 					onDayDblClick={(date) => { navDate = parseISO(date); viewMode = "day"; }}
 					onSlotClick={(dateISO) => openNewEvent(dateISO.slice(0, 10))}
@@ -412,6 +488,7 @@ let searchFocusTrigger = $state(0);
 					{displayTzid}
 					dayStart={prefs.dayStart}
 					dayEnd={prefs.dayEnd}
+					{focusedInstanceId}
 					onEventClick={openPopover}
 					onEventDblClick={openEditEvent}
 					onWeekClick={(date) => { navDate = parseISO(date); viewMode = "week"; }}

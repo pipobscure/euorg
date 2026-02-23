@@ -26,6 +26,12 @@
 	let editScope = $state<RecurringEditScope>("this");
 	let showScopeSelector = $derived(instance?.hasRRule ?? false);
 	let scopeConfirmed = $state(!instance?.hasRRule);
+	const scopeOptions: { value: RecurringEditScope; label: string }[] = [
+		{ value: "this", label: "This event only" },
+		{ value: "thisAndFollowing", label: "This and following events" },
+		{ value: "all", label: "All events" },
+	];
+	let modalEl = $state<HTMLElement | null>(null);
 
 	// ── Form fields ──────────────────────────────────────────────────────────
 
@@ -189,6 +195,16 @@
 		if (e.key === "Escape") {
 			e.stopPropagation();
 			onCancel();
+		} else if (!scopeConfirmed && (e.key === "ArrowDown" || e.key === "ArrowRight")) {
+			e.preventDefault();
+			e.stopPropagation();
+			const idx = scopeOptions.findIndex(o => o.value === editScope);
+			editScope = scopeOptions[(idx + 1) % scopeOptions.length].value;
+		} else if (!scopeConfirmed && (e.key === "ArrowUp" || e.key === "ArrowLeft")) {
+			e.preventDefault();
+			e.stopPropagation();
+			const idx = scopeOptions.findIndex(o => o.value === editScope);
+			editScope = scopeOptions[(idx - 1 + scopeOptions.length) % scopeOptions.length].value;
 		} else if (e.key === "Enter" && !e.shiftKey) {
 			const tag = (e.target as HTMLElement)?.tagName;
 			if (tag === "TEXTAREA" || tag === "SELECT") return; // let Enter work normally there
@@ -204,6 +220,11 @@
 
 	// Load description, location, and url from ICS when editing an existing event
 	onMount(async () => {
+		// Focus the modal when the scope selector is shown so arrow/enter keys work immediately
+		if (!scopeConfirmed) {
+			modalEl?.focus();
+		}
+
 		if (instance) {
 			try {
 				const detail = await rpc.request.getEventDetail({ uid: instance.uid });
@@ -225,6 +246,7 @@
 <!-- Modal -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
+	bind:this={modalEl}
 	class="fixed inset-0 m-auto z-50 w-full max-w-lg h-fit rounded-2xl border border-surface-200-800 bg-surface-50-950 shadow-2xl"
 	onkeydown={handleKeydown}
 	role="dialog"
@@ -247,12 +269,11 @@
 	{#if showScopeSelector && !scopeConfirmed}
 		<div class="px-6 py-6 space-y-3">
 			<p class="text-sm font-medium text-surface-700-300">Edit recurring event:</p>
-			{#each [
-				{ value: "this" as RecurringEditScope, label: "This event only" },
-				{ value: "thisAndFollowing" as RecurringEditScope, label: "This and following events" },
-				{ value: "all" as RecurringEditScope, label: "All events" },
-			] as opt}
-				<label class="flex cursor-pointer items-center gap-3 rounded-xl border border-surface-200-800 p-3 hover:bg-surface-100-900">
+			{#each scopeOptions as opt}
+				<label class="flex cursor-pointer items-center gap-3 rounded-xl border p-3 transition-colors
+					{editScope === opt.value
+						? 'border-primary-500 bg-primary-50 dark:bg-primary-950/30'
+						: 'border-surface-200-800 hover:bg-surface-100-900'}">
 					<input type="radio" bind:group={editScope} value={opt.value} class="accent-primary-500" />
 					<span class="text-sm">{opt.label}</span>
 				</label>

@@ -11,6 +11,7 @@
 		displayTzid: string;
 		calendars: CalendarView[];
 		startOfWeek: "monday" | "sunday";
+		focusedInstanceId?: string | null;
 		onEventClick: (instance: EventInstance, anchor: DOMRect) => void;
 		onEventDblClick: (instance: EventInstance) => void;
 		onDayClick: (date: string) => void;
@@ -19,7 +20,7 @@
 		onDrop: (instanceId: string, newDate: string) => void;
 	}
 
-	let { instances, navDate, displayTzid, calendars, startOfWeek, onEventClick, onEventDblClick, onDayClick, onDayDblClick, onWeekDblClick, onDrop }: Props = $props();
+	let { instances, navDate, displayTzid, calendars, startOfWeek, focusedInstanceId, onEventClick, onEventDblClick, onDayClick, onDayDblClick, onWeekDblClick, onDrop }: Props = $props();
 
 	let _clickTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -174,8 +175,10 @@
 									ondragstart={(e) => handleDragStart(e, inst.instanceId)}
 									ondragend={handleDragEnd}
 									onclick={(e) => handleEventClick(inst, e)}
+									data-instance-id={inst.instanceId}
 
-									class="w-full truncate rounded px-1 py-0.5 text-left text-xs text-white font-medium hover:opacity-80 transition-opacity"
+									class="w-full truncate rounded px-1 py-0.5 text-left text-xs text-white font-medium hover:opacity-80 transition-opacity
+										{focusedInstanceId === inst.instanceId ? 'ring-2 ring-white' : ''}"
 									style="background-color: {inst.color};"
 								>
 									{#if !inst.isAllDay}

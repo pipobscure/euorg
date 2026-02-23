@@ -12,6 +12,7 @@
 		startOfWeek: "monday" | "sunday";
 		dayStart: number;
 		dayEnd: number;
+		focusedInstanceId?: string | null;
 		onEventClick: (instance: EventInstance, anchor: DOMRect) => void;
 		onEventDblClick: (instance: EventInstance) => void;
 		onDayDblClick: (date: string) => void;
@@ -19,7 +20,7 @@
 		onDrop: (uid: string, instanceStartISO: string, newStartISO: string) => void;
 	}
 
-	let { instances, navDate, displayTzid, startOfWeek, dayStart, dayEnd, onEventClick, onEventDblClick, onDayDblClick, onSlotClick, onDrop }: Props = $props();
+	let { instances, navDate, displayTzid, startOfWeek, dayStart, dayEnd, focusedInstanceId, onEventClick, onEventDblClick, onDayDblClick, onSlotClick, onDrop }: Props = $props();
 
 	let _clickTimer: ReturnType<typeof setTimeout> | null = null;
 	let _dayClickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -215,7 +216,9 @@
 						{#each dayInstances as inst (inst.instanceId)}
 							<button
 								onclick={(e) => handleEventClick(inst, e)}
-								class="mb-0.5 block w-full truncate rounded px-1 py-0.5 text-left text-xs text-white font-medium hover:opacity-80"
+								data-instance-id={inst.instanceId}
+								class="mb-0.5 block w-full truncate rounded px-1 py-0.5 text-left text-xs text-white font-medium hover:opacity-80
+									{focusedInstanceId === inst.instanceId ? 'ring-2 ring-white' : ''}"
 								style="background-color: {inst.color};"
 							>{inst.summary}</button>
 						{/each}
@@ -294,7 +297,9 @@
 							draggable="true"
 							ondragstart={(e) => { e.stopPropagation(); handleDragStart(e, inst); }}
 							onclick={(e) => handleEventClick(inst, e)}
-							class="absolute rounded px-1 py-0.5 text-left text-xs text-white overflow-hidden hover:opacity-90 transition-opacity cursor-pointer"
+							data-instance-id={inst.instanceId}
+							class="absolute rounded px-1 py-0.5 text-left text-xs text-white overflow-hidden hover:opacity-90 transition-opacity cursor-pointer
+								{focusedInstanceId === inst.instanceId ? 'ring-2 ring-white ring-inset' : ''}"
 							style="
 								top: {top}px;
 								height: {Math.max(height, 20)}px;
