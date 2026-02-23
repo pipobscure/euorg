@@ -303,6 +303,17 @@ export class CalendarDB {
 			dtend = toUtcISO(event.dtend, event.dtendTzid, event.dtstartIsDate);
 			dtendUtc = iCalToUtcISOStr(event.dtend, event.dtendTzid, event.dtstartIsDate);
 		}
+		// Normalize all-day events where DTEND ≤ DTSTART (zero-duration, non-standard).
+		// Some ICS feeds use same-day DTEND instead of RFC 5545 exclusive next-day DTEND.
+		// Without this, dtend_utc = dtstart_utc and the SQL strict > comparison excludes
+		// the event from its own date's query range.
+		if (event.dtstartIsDate && dtstartUtc && dtendUtc && dtendUtc <= dtstartUtc) {
+			const d = new Date(dtstartUtc);
+			d.setUTCDate(d.getUTCDate() + 1);
+			const y = d.getUTCFullYear(), mo = String(d.getUTCMonth() + 1).padStart(2, "0"), da = String(d.getUTCDate()).padStart(2, "0");
+			dtend = `${y}${mo}${da}`;
+			dtendUtc = `${y}-${mo}-${da}T00:00:00Z`;
+		}
 		// Note: if only DURATION is present, dtend/dtendUtc remain null;
 		// instances.ts handles duration → end expansion at display time.
 

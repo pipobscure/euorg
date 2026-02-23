@@ -63,7 +63,7 @@
 		return "custom";
 	}
 
-	const enabledCalendars = $derived(calendars.filter((c) => c.enabled));
+	const enabledCalendars = $derived(calendars.filter((c) => c.enabled && !c.readonly));
 
 	function buildRrule(): string | undefined {
 		switch (rrulePreset) {

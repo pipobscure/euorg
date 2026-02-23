@@ -68,11 +68,13 @@ export interface CalendarView {
 	name: string;
 	color: string;
 	enabled: boolean;
+	/** true for ICS subscription calendars — events are read-only */
+	readonly: boolean;
 }
 
 export interface AccountView {
 	id: string;
-	accountType: "dav" | "smtp";
+	accountType: "dav" | "smtp" | "subscription";
 	name: string;
 	serverUrl: string;
 	username: string;

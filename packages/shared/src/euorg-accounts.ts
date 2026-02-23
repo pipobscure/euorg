@@ -49,6 +49,10 @@ export interface CalDavCalendar {
 	/** Hex color, e.g. "#6366f1" */
 	color: string;
 	enabled: boolean;
+	/** "caldav" (default) or "ics-subscription" for read-only ICS feeds */
+	sourceType?: "caldav" | "ics-subscription";
+	/** HTTP ETag from the last fetched ICS feed (subscription calendars only) */
+	subscriptionEtag?: string | null;
 }
 
 export interface CalDavConfig {
@@ -74,9 +78,10 @@ export interface EuorgAccount {
 	/**
 	 * "dav" — a CardDAV/CalDAV account (contacts + calendar sync).
 	 * "smtp" — a standalone SMTP account (for sending mail/invitations).
+	 * "subscription" — a read-only ICS feed subscription (no credentials).
 	 * Defaults to "dav" when absent (backward compatibility).
 	 */
-	accountType: "dav" | "smtp";
+	accountType: "dav" | "smtp" | "subscription";
 	/** Human-readable display name, e.g. "mailbox.org" */
 	name: string;
 	/** Base server URL — for dav: DAV discovery root; for smtp: not used */

@@ -462,6 +462,151 @@ export async function deleteEvent(
 	}
 }
 
+/**
+ * Create a new calendar collection on the server via MKCALENDAR.
+ * Returns the newly created calendar as discovered (server may rename the slug).
+ */
+export async function createCalendarCollection(
+	homeUrl: string,
+	name: string,
+	color: string,
+	creds: CalDAVCredentials,
+): Promise<RemoteCalendar> {
+	const auth = basicAuth(creds.username, creds.password);
+	const slug = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "") || "calendar";
+	const url = homeUrl.replace(/\/$/, "") + "/" + slug + "/";
+
+	const body = `<?xml version="1.0" encoding="utf-8"?>
+<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:apple="http://apple.com/ns/ical/">
+  <D:set>
+    <D:prop>
+      <D:displayname>${name}</D:displayname>
+      <apple:calendar-color>${color}</apple:calendar-color>
+      <C:supported-calendar-component-set>
+        <C:comp name="VEVENT"/>
+      </C:supported-calendar-component-set>
+    </D:prop>
+  </D:set>
+</C:mkcalendar>`;
+
+	const res = await fetch(url, {
+		method: "MKCALENDAR",
+		headers: {
+			Authorization: auth,
+			"Content-Type": "application/xml; charset=utf-8",
+		},
+		body,
+	});
+
+	if (!res.ok && res.status !== 201) {
+		throw new Error(`MKCALENDAR ${url} → ${res.status} ${await res.text()}`);
+	}
+
+	// Re-discover to get the server-confirmed URL and id
+	const all = await discoverCalendars(creds);
+	// Find the newly created calendar by URL prefix match (server may canonicalize)
+	const created = all.find(
+		(c) => c.url === url || c.url.endsWith("/" + slug + "/") || c.name === name,
+	);
+	if (!created) {
+		// Fallback: return a synthetic entry with the requested URL
+		const id = btoa(url).replace(/=/g, "");
+		return { id, url, name, color };
+	}
+	return created;
+}
+
+/**
+ * Delete a calendar collection and all its contents from the server.
+ * This is irreversible — the server removes the entire collection.
+ */
+export async function deleteCalendarCollection(
+	calendarUrl: string,
+	creds: CalDAVCredentials,
+): Promise<void> {
+	const auth = basicAuth(creds.username, creds.password);
+	const res = await fetch(calendarUrl, {
+		method: "DELETE",
+		headers: {
+			Authorization: auth,
+			Depth: "infinity",
+		},
+	});
+	if (!res.ok && res.status !== 204 && res.status !== 404) {
+		throw new Error(`DELETE ${calendarUrl} → ${res.status} ${await res.text()}`);
+	}
+}
+
+/**
+ * Fetch a public ICS feed URL. Returns null if the ETag matches (no change).
+ * Uses HTTP conditional requests (If-None-Match) when a previous ETag is known.
+ */
+export async function fetchICSFeed(
+	url: string,
+	lastEtag?: string | null,
+): Promise<{ ics: string; etag: string | null } | null> {
+	const headers: Record<string, string> = {
+		"User-Agent": "euorg-calendar/1.0",
+		Accept: "text/calendar, application/ics, */*",
+	};
+	if (lastEtag) {
+		headers["If-None-Match"] = `"${lastEtag}"`;
+	}
+
+	const res = await fetch(url, { headers, redirect: "follow" });
+
+	if (res.status === 304) return null; // Not modified
+	if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+
+	const etag = (res.headers.get("ETag") ?? "").replace(/^"|"$/g, "") || null;
+	// If etag matches what we sent, no change
+	if (etag && lastEtag && etag === lastEtag) return null;
+
+	const ics = await res.text();
+	return { ics, etag };
+}
+
+/**
+ * Discover the CalDAV calendar-home-set URL for the given credentials.
+ * Returns the home set URL, or null if discovery fails.
+ * Used by addCalendarToAccount when homeUrl is not yet cached.
+ */
+export async function discoverCalendarHomeUrl(creds: CalDAVCredentials): Promise<string | null> {
+	const auth = basicAuth(creds.username, creds.password);
+	const baseUrl = creds.serverUrl.replace(/\/$/, "");
+
+	// Step 1: Find principal URL
+	let principalUrl: string | null = null;
+	const discoveryUrls = [
+		baseUrl,
+		`${baseUrl}/.well-known/caldav`,
+		`${baseUrl}/dav`,
+		`${baseUrl}/remote.php/dav`,
+	];
+
+	for (const url of discoveryUrls) {
+		try {
+			const { xml, status } = await propfind(url, PROPFIND_PRINCIPAL, auth, "0");
+			if (status === 207 || status === 200) {
+				principalUrl = findPrincipalUrl(xml, baseUrl);
+				if (principalUrl) break;
+			}
+		} catch {
+			// try next
+		}
+	}
+
+	if (!principalUrl) principalUrl = baseUrl;
+
+	// Step 2: Find calendar home set
+	try {
+		const { xml } = await propfind(principalUrl, PROPFIND_HOME_SET, auth, "0");
+		return findCalendarHomeSetUrl(xml, baseUrl);
+	} catch {
+		return null;
+	}
+}
+
 /** Test connectivity and credentials. Returns null on success, error message on failure. */
 export async function testConnection(creds: CalDAVCredentials): Promise<string | null> {
 	try {

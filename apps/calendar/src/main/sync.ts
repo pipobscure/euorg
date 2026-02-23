@@ -49,12 +49,16 @@ import {
 } from "./ics.ts";
 import {
 	discoverCalendars,
+	discoverCalendarHomeUrl,
 	listEtags,
 	fetchEventsInRange,
 	fetchEvent,
 	createEvent as caldavCreate,
 	updateEvent as caldavUpdate,
 	deleteEvent as caldavDelete,
+	createCalendarCollection,
+	deleteCalendarCollection,
+	fetchICSFeed,
 	type CalDAVCredentials,
 } from "./caldav.ts";
 
@@ -118,15 +122,20 @@ export async function syncAll(
 		});
 
 		try {
-			const r = await syncCalendar(
-				db, account, calendar,
-				onEventsStored,
-				(eventsDone, eventsTotal) => onProgress({
-					phase: "syncing", done, total,
-					accountName: account.name, calendarName: calendar.name,
-					eventsDone, eventsTotal,
-				}),
-			);
+			let r: SyncResult;
+			if (account.accountType === "subscription") {
+				r = await syncICSSubscription(db, account, calendar);
+			} else {
+				r = await syncCalendar(
+					db, account, calendar,
+					onEventsStored,
+					(eventsDone, eventsTotal) => onProgress({
+						phase: "syncing", done, total,
+						accountName: account.name, calendarName: calendar.name,
+						eventsDone, eventsTotal,
+					}),
+				);
+			}
 			result.added += r.added;
 			result.updated += r.updated;
 			result.deleted += r.deleted;
@@ -776,7 +785,13 @@ export async function rediscoverCalendars(accountId: string): Promise<CalDavCale
 	const account = cfg.accounts.find((a) => a.id === accountId);
 	if (!account) throw new Error(`Account ${accountId} not found`);
 
-	const remote = await discoverCalendars(creds(account));
+	// Discover calendars and homeUrl in parallel
+	const [remote, discoveredHomeUrl] = await Promise.all([
+		discoverCalendars(creds(account)),
+		account.caldav?.homeUrl
+			? Promise.resolve(account.caldav.homeUrl)
+			: discoverCalendarHomeUrl(creds(account)).catch(() => null),
+	]);
 
 	const existing = account.caldav?.calendars ?? [];
 	const calendars: CalDavCalendar[] = remote.map((r) => {
@@ -791,7 +806,7 @@ export async function rediscoverCalendars(accountId: string): Promise<CalDavCale
 	});
 
 	account.caldav = {
-		homeUrl: account.caldav?.homeUrl ?? null,
+		homeUrl: discoveredHomeUrl,
 		defaultCalendarId: account.caldav?.defaultCalendarId ?? (calendars[0]?.id ?? null),
 		calendars,
 	};
@@ -803,6 +818,122 @@ export async function rediscoverCalendars(accountId: string): Promise<CalDavCale
 	writeAccounts(newCfg);
 
 	return calendars;
+}
+
+// ── ICS Subscription Sync ─────────────────────────────────────────────────────
+
+/**
+ * Sync a single ICS subscription calendar.
+ * Fetches the feed URL, compares ETag, and replaces all events if changed.
+ */
+async function syncICSSubscription(
+	db: CalendarDB,
+	account: EuorgAccount,
+	calendar: CalDavCalendar,
+): Promise<SyncResult> {
+	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [] };
+	try {
+		const feed = await fetchICSFeed(account.serverUrl, calendar.subscriptionEtag);
+		if (!feed) {
+			return result; // ETag matched — no change
+		}
+
+		const parsed = parseICS(feed.ics);
+		// Replace all events for this calendar
+		db.deleteEventsByCalendar(calendar.id);
+		let added = 0;
+		for (const event of parsed.events) {
+			try {
+				const path = writeICS(event.uid, event.recurrenceId, feed.ics);
+				db.upsertEvent(event, calendar.id, account.id, account.serverUrl, feed.etag ?? "", path);
+				added++;
+			} catch (e) {
+				result.errors.push(`ICS ${event.uid}: ${e instanceof Error ? e.message : String(e)}`);
+			}
+		}
+		result.added = added;
+		result.added = added;
+
+		// Persist updated ETag
+		const cfg = readAccounts();
+		const acc = cfg.accounts.find((a) => a.id === account.id);
+		if (acc?.caldav) {
+			const cal = acc.caldav.calendars.find((c) => c.id === calendar.id);
+			if (cal) cal.subscriptionEtag = feed.etag;
+			writeAccounts(cfg);
+		}
+	} catch (e) {
+		result.errors.push(e instanceof Error ? e.message : String(e));
+	}
+	return result;
+}
+
+// ── Calendar Management (create/delete on server) ─────────────────────────────
+
+/**
+ * Create a new calendar collection on the CalDAV server and add it to the account config.
+ * Returns the new CalDavCalendar entry.
+ */
+export async function addCalendarToAccount(
+	db: CalendarDB,
+	accountId: string,
+	name: string,
+	color: string,
+): Promise<CalDavCalendar> {
+	const cfg = readAccounts();
+	const account = cfg.accounts.find((a) => a.id === accountId);
+	if (!account?.caldav) throw new Error("Account not found");
+
+	// Discover homeUrl if not yet cached in accounts.json
+	let homeUrl = account.caldav.homeUrl;
+	if (!homeUrl) {
+		homeUrl = await discoverCalendarHomeUrl(creds(account));
+		if (!homeUrl) throw new Error("Cannot discover calendar home URL");
+		account.caldav.homeUrl = homeUrl; // cache for future use
+	}
+
+	const c = creds(account);
+	const remote = await createCalendarCollection(homeUrl, name, color, c);
+
+	const newCal: CalDavCalendar = {
+		id: remote.id,
+		url: remote.url,
+		name: remote.name ?? name,
+		color: remote.color ?? color,
+		enabled: true,
+		sourceType: "caldav",
+	};
+
+	account.caldav.calendars = [...account.caldav.calendars, newCal];
+	writeAccounts(cfg); // writes updated homeUrl + new calendar in one pass
+	return newCal;
+}
+
+/**
+ * Delete a calendar collection from the CalDAV server and remove it from the account config.
+ * Also removes all locally cached events for this calendar.
+ */
+export async function removeCalendarFromAccount(
+	db: CalendarDB,
+	accountId: string,
+	calendarId: string,
+): Promise<void> {
+	const cfg = readAccounts();
+	const account = cfg.accounts.find((a) => a.id === accountId);
+	if (!account?.caldav) throw new Error("Account not found");
+
+	const calendar = account.caldav.calendars.find((c) => c.id === calendarId);
+	if (!calendar) throw new Error("Calendar not found");
+
+	const c = creds(account);
+	await deleteCalendarCollection(calendar.url, c);
+
+	account.caldav.calendars = account.caldav.calendars.filter((c) => c.id !== calendarId);
+	if (account.caldav.defaultCalendarId === calendarId) {
+		account.caldav.defaultCalendarId = account.caldav.calendars[0]?.id ?? null;
+	}
+	writeAccounts(cfg);
+	db.deleteEventsByCalendar(calendarId);
 }
 
 /** Serialize VEventInput with a RECURRENCE-ID override (for "this" edit scope) */

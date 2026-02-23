@@ -82,6 +82,9 @@
 	// ── Load instances when range changes ────────────────────────────────────
 
 	let loadKey = $derived(`${rangeStart}|${rangeEnd}|${displayTzid}`);
+	// Sequence counter: each loadInstances() call gets a unique seq.
+	// Only the latest call's result is applied; stale concurrent responses are discarded.
+	let loadSeq = 0;
 	$effect(() => {
 		// React to loadKey changes
 		loadKey;
@@ -89,14 +92,17 @@
 	});
 
 	async function loadInstances() {
+		const seq = ++loadSeq;
 		try {
 			const result = await rpc.request.getInstances({
 				startISO: rangeStart,
 				endISO: rangeEnd,
 				displayTzid,
 			});
+			if (seq !== loadSeq) return; // stale response — a newer call already finished
 			instances = result ?? [];
 		} catch (e) {
+			if (seq !== loadSeq) return;
 			console.error("[calendar] getInstances failed:", e);
 		}
 	}
@@ -240,7 +246,7 @@
 	// ── Helpers ──────────────────────────────────────────────────────────────
 
 	function getDefaultCalendarId(): string {
-		const enabledCals = calendars.filter((c) => c.enabled);
+		const enabledCals = calendars.filter((c) => c.enabled && !c.readonly);
 		return enabledCals[0]?.id ?? "";
 	}
 

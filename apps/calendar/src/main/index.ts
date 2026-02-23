@@ -34,6 +34,8 @@ import {
 	writeDelete,
 	writeReschedule,
 	rediscoverCalendars,
+	addCalendarToAccount,
+	removeCalendarFromAccount,
 	type RecurringEditScope,
 	type SyncProgress,
 	type SyncResult,
@@ -115,7 +117,7 @@ function saveCalendarPrefs(prefs: Partial<CalendarPrefs>): void {
 
 interface AccountView {
 	id: string;
-	accountType: "dav" | "smtp";
+	accountType: "dav" | "smtp" | "subscription";
 	name: string;
 	serverUrl: string;
 	username: string;
@@ -136,6 +138,8 @@ interface CalendarView {
 	name: string;
 	color: string;
 	enabled: boolean;
+	/** true for ICS subscription calendars — no write operations allowed */
+	readonly: boolean;
 }
 
 interface EventInput {
@@ -171,7 +175,14 @@ function toAccountView(a: EuorgAccount): AccountView {
 }
 
 function toCalendarView(cal: CalDavCalendar, accountId: string): CalendarView {
-	return { id: cal.id, accountId, name: cal.name, color: cal.color, enabled: cal.enabled };
+	return {
+		id: cal.id,
+		accountId,
+		name: cal.name,
+		color: cal.color,
+		enabled: cal.enabled,
+		readonly: cal.sourceType === "ics-subscription",
+	};
 }
 
 function buildCalendarMap(): Map<string, CalDavCalendar> {
@@ -247,6 +258,9 @@ interface CalendarRPCSchema extends ElectrobunRPCSchema {
 			getCalendars: { params: { accountId: string }; response: CalendarView[] };
 			getAllCalendars: { params: void; response: CalendarView[] };
 			rediscoverCalendars: { params: { accountId: string }; response: CalendarView[] };
+			addCalendar: { params: { accountId: string; name: string; color: string }; response: CalendarView };
+			deleteCalendar: { params: { accountId: string; calendarId: string }; response: void };
+			addSubscription: { params: { url: string; name: string; color: string }; response: { account: AccountView; calendar: CalendarView } };
 			setCalendarEnabled: { params: { accountId: string; calendarId: string; enabled: boolean }; response: void };
 			setCalendarColor: { params: { accountId: string; calendarId: string; color: string }; response: void };
 			setDefaultCalendar: { params: { accountId: string; calendarId: string }; response: void };
@@ -450,7 +464,9 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 			async deleteAccount({ id }) {
 				const cfg = readAccounts();
 				const account = getAccount(cfg, id);
-				if (account?.accountType === "dav") db.deleteEventsByAccount(id);
+				if (account?.accountType === "dav" || account?.accountType === "subscription") {
+					db.deleteEventsByAccount(id);
+				}
 				writeAccounts(removeAccount(cfg, id));
 			},
 
@@ -561,6 +577,52 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 			async rediscoverCalendars({ accountId }) {
 				const calendars = await rediscoverCalendars(accountId);
 				return calendars.map((c) => toCalendarView(c, accountId));
+			},
+
+			async addCalendar({ accountId, name, color }) {
+				const cal = await addCalendarToAccount(db, accountId, name, color);
+				return toCalendarView(cal, accountId);
+			},
+
+			async deleteCalendar({ accountId, calendarId }) {
+				await removeCalendarFromAccount(db, accountId, calendarId);
+			},
+
+			async addSubscription({ url, name, color }) {
+				const cfg = readAccounts();
+				const id = generateUID();
+				const calId = btoa(url).replace(/=/g, "");
+				const calendar: CalDavCalendar = {
+					id: calId,
+					url,
+					name,
+					color,
+					enabled: true,
+					sourceType: "ics-subscription",
+					subscriptionEtag: null,
+				};
+				const account: EuorgAccount = {
+					id,
+					accountType: "subscription",
+					name,
+					serverUrl: url,
+					username: "",
+					password: "",
+					enabled: true,
+					caldav: { homeUrl: null, defaultCalendarId: null, calendars: [calendar] },
+				};
+				writeAccounts(upsertAccount(cfg, account));
+				// Immediately sync the new subscription feed so events appear without manual sync
+				setTimeout(() => {
+					syncAll(
+						db,
+						(p) => rpc.send("syncProgress", p),
+						() => rpc.send("eventChanged", { uid: "", action: "updated" }),
+					)
+						.then((r) => rpc.send("syncComplete", r))
+						.catch(() => {});
+				}, 200);
+				return { account: toAccountView(account), calendar: toCalendarView(calendar, id) };
 			},
 
 			async setCalendarEnabled({ accountId, calendarId, enabled }) {
