@@ -36,6 +36,15 @@
 			.join(", ");
 	}
 
+	function addressMapUrl(adr: VCard["addresses"][0]): string {
+		if (adr.geoLat != null && adr.geoLon != null) {
+			const lat = adr.geoLat, lon = adr.geoLon;
+			return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
+		}
+		const q = formatAddress(adr);
+		return `https://www.openstreetmap.org/search?query=${encodeURIComponent(q)}`;
+	}
+
 	let currentAccount = $derived(accounts.find((a) => a.id === row.accountId));
 	let currentCollection = $derived(collections.find((c) => c.id === row.collectionId));
 </script>
@@ -112,7 +121,11 @@
 				<h3 class="text-surface-400 mb-1 text-xs font-semibold uppercase tracking-wider">Address</h3>
 				{#each card.addresses as adr}
 					<div class="flex items-start gap-2">
-						<span>{formatAddress(adr)}</span>
+						<a
+							href={addressMapUrl(adr)}
+							class="text-primary-500 hover:underline"
+							onclick={(e) => openLink(e, addressMapUrl(adr))}
+						>{formatAddress(adr)}</a>
 						{#if adr.type}
 							<span class="text-surface-400 text-xs capitalize">{adr.type}</span>
 						{/if}

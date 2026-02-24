@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { VCard, VCardInput, Collection } from "../lib/types.ts";
+	import type { VCard, VCardInput, Collection, AddressSuggestion } from "../lib/types.ts";
 	import { rpc } from "../lib/rpc.ts";
 
 	interface Props {
@@ -30,7 +30,7 @@
 	let phones = $state<Array<{ value: string; type: string }>>(
 		card?.phones.length ? card.phones.map((p) => ({ ...p })) : [{ value: "", type: "cell" }],
 	);
-	let addresses = $state<Array<{ street: string; city: string; region: string; postcode: string; country: string; type: string }>>(
+	let addresses = $state<Array<{ street: string; city: string; region: string; postcode: string; country: string; type: string; geoLat?: number; geoLon?: number }>>(
 		card?.addresses.length
 			? card.addresses.map((a) => ({ ...a }))
 			: [],
@@ -49,7 +49,48 @@
 	function addAddress() {
 		addresses = [...addresses, { street: "", city: "", region: "", postcode: "", country: "", type: "home" }];
 	}
-	function removeAddress(i: number) { addresses = addresses.filter((_, idx) => idx !== i); }
+	function removeAddress(i: number) {
+		addresses = addresses.filter((_, idx) => idx !== i);
+		if (addrSuggestionsFor === i) addrSuggestionsFor = null;
+	}
+
+	// ── Address autocomplete ──────────────────────────────────────────────────
+
+	let addrSuggestions = $state<AddressSuggestion[]>([]);
+	let addrSuggestionsFor = $state<number | null>(null);
+	let addrSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function handleStreetInput(e: Event, i: number) {
+		const q = (e.target as HTMLInputElement).value;
+		addresses = addresses.map((a, idx) => idx === i ? { ...a, street: q, geoLat: undefined, geoLon: undefined } : a);
+		if (addrSearchTimer) clearTimeout(addrSearchTimer);
+		if (q.trim().length < 2) { addrSuggestions = []; addrSuggestionsFor = null; return; }
+		addrSearchTimer = setTimeout(async () => {
+			try {
+				const results = await rpc.request.searchAddresses({ query: q.trim() });
+				addrSuggestions = results;
+				addrSuggestionsFor = results.length > 0 ? i : null;
+			} catch {
+				addrSuggestions = [];
+				addrSuggestionsFor = null;
+			}
+		}, 300);
+	}
+
+	function selectAddressSuggestion(i: number, sug: AddressSuggestion) {
+		addresses = addresses.map((a, idx) => idx === i ? {
+			...a,
+			street: sug.street,
+			city: sug.city,
+			region: sug.region,
+			postcode: sug.postcode,
+			country: sug.country,
+			geoLat: sug.geoLat,
+			geoLon: sug.geoLon,
+		} : a);
+		addrSuggestions = [];
+		addrSuggestionsFor = null;
+	}
 
 	let saving = $state(false);
 	let error = $state("");
@@ -224,7 +265,29 @@
 								aria-label="Remove address"
 							>Remove</button>
 						</div>
-						<input class="input mb-2 w-full" type="text" placeholder="Street" bind:value={adr.street} />
+						<!-- Street with autocomplete -->
+						<div class="relative mb-2">
+							<input
+								class="input w-full"
+								type="text"
+								placeholder="Street"
+								value={adr.street}
+								oninput={(e) => handleStreetInput(e, i)}
+							/>
+							{#if addrSuggestionsFor === i && addrSuggestions.length > 0}
+								<ul class="bg-surface-50-950 border-surface-300-700 absolute z-50 mt-1 w-full rounded-lg border shadow-lg">
+									{#each addrSuggestions as sug}
+										<li>
+											<button
+												class="hover:bg-surface-100-800 w-full px-3 py-2 text-left text-sm"
+												type="button"
+												onmousedown={(e) => { e.preventDefault(); selectAddressSuggestion(i, sug); }}
+											>{sug.text}</button>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</div>
 						<div class="grid grid-cols-2 gap-2">
 							<input class="input" type="text" placeholder="City" bind:value={adr.city} />
 							<input class="input" type="text" placeholder="Region/State" bind:value={adr.region} />

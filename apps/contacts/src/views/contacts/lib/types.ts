@@ -34,6 +34,8 @@ export interface VCard {
 		postcode: string;
 		country: string;
 		type: string;
+		geoLat?: number;
+		geoLon?: number;
 	}>;
 	org: string;
 	title: string;
@@ -95,10 +97,23 @@ export interface VCardInput {
 		postcode: string;
 		country: string;
 		type: string;
+		geoLat?: number;
+		geoLon?: number;
 	}>;
 	org?: string;
 	title?: string;
 	birthday?: string;
 	note?: string;
 	photo?: string;
+}
+
+export interface AddressSuggestion {
+	text: string;
+	street: string;
+	city: string;
+	region: string;
+	postcode: string;
+	country: string;
+	geoLat: number;
+	geoLon: number;
 }

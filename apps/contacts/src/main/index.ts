@@ -84,6 +84,10 @@ interface ContactsRPCSchema extends ElectrobunRPCSchema {
 			getKeystoreType: { params: void; response: KeystoreType };
 			setKeystoreType: { params: { type: KeystoreType }; response: void };
 			getPendingCount: { params: void; response: number };
+			searchAddresses: {
+				params: { query: string };
+				response: Array<{ text: string; street: string; city: string; region: string; postcode: string; country: string; geoLat: number; geoLon: number }>;
+			};
 		};
 		messages: {};
 	}>;
@@ -462,6 +466,43 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 				return allEnabledCollections(readAccounts()).map(({ account, collection }) =>
 					collectionToView(account.id, collection),
 				);
+			},
+
+			async searchAddresses({ query }) {
+				if (query.trim().length < 2) return [];
+				try {
+					const res = await fetch(
+						`https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=5`,
+						{ headers: { "User-Agent": "euorg-contacts/1.0" }, signal: AbortSignal.timeout(3000) },
+					);
+					const data = await res.json() as {
+						features: Array<{
+							geometry: { coordinates: [number, number] };
+							properties: {
+								name?: string; street?: string; housenumber?: string;
+								city?: string; state?: string; country?: string; postcode?: string;
+							};
+						}>;
+					};
+					const results = [];
+					for (const f of data.features ?? []) {
+						const p = f.properties;
+						const [lon, lat] = f.geometry.coordinates;
+						const streetBase = p.housenumber ? `${p.street ?? ""} ${p.housenumber}`.trim() : (p.street ?? "");
+						const street = p.name && streetBase ? `${p.name}, ${streetBase}` : p.name ?? streetBase;
+						const city = p.city ?? "";
+						const region = p.state ?? "";
+						const postcode = p.postcode ?? "";
+						const country = p.country ?? "";
+						const parts = [p.name ?? street, city, region, country].filter(Boolean);
+						const text = parts.join(", ");
+						if (!text) continue;
+						results.push({ text, street, city, region, postcode, country, geoLat: lat, geoLon: lon });
+					}
+					return results;
+				} catch {
+					return [];
+				}
 			},
 
 			async openExternal({ url }) {

@@ -21,6 +21,8 @@ export interface VCardAddress {
 	postcode: string;
 	country: string;
 	type: string; // "home" | "work" | ""
+	geoLat?: number;
+	geoLon?: number;
 }
 
 export interface VCard {
@@ -235,6 +237,19 @@ export function parseVCard(raw: string): VCard {
 			case "REV":
 				card.rev = value.trim();
 				break;
+			case "GEO": {
+				// GEO:lat;lon (vCard 3) or GEO;VALUE=uri:geo:lat,lon (vCard 4)
+				// Assign to first address so it round-trips through serialize/parse
+				const geoStr = value.startsWith("geo:") ? value.slice(4) : value;
+				const sep = geoStr.includes(",") ? "," : ";";
+				const [latStr, lonStr] = geoStr.split(sep);
+				const lat = parseFloat(latStr), lon = parseFloat(lonStr);
+				if (!isNaN(lat) && !isNaN(lon) && card.addresses.length > 0) {
+					card.addresses[0].geoLat = lat;
+					card.addresses[0].geoLon = lon;
+				}
+				break;
+			}
 		}
 	}
 
@@ -342,6 +357,10 @@ export function serializeVCard(input: VCardInput): string {
 	if (input.birthday) lines.push(`BDAY:${input.birthday.replace(/-/g, "")}`);
 	if (input.note) lines.push(fold(`NOTE:${encodeValue(input.note)}`));
 	if (input.photo) lines.push(fold(`PHOTO:${input.photo}`));
+
+	// Write GEO for the first address that has coordinates (RFC 6350 §6.5.2)
+	const geocodedAdr = (input.addresses ?? []).find((a) => a.geoLat != null && a.geoLon != null);
+	if (geocodedAdr) lines.push(`GEO:geo:${geocodedAdr.geoLat},${geocodedAdr.geoLon}`);
 
 	lines.push(`REV:${now}Z`);
 	lines.push("END:VCARD");
