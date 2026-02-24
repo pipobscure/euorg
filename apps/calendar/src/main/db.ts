@@ -61,6 +61,19 @@ export interface EventRow {
 	status: string;
 	organizer: string;
 	lastSynced: number;
+	/** null = synced; 'create' | 'update' | 'delete' = pending offline push */
+	pendingSync: string | null;
+}
+
+export interface OfflineQueueItem {
+	id: number;
+	operation: 'create' | 'update' | 'delete';
+	uid: string;
+	calendarId: string;
+	accountId: string;
+	href: string | null;
+	etag: string | null;
+	queuedAt: number;
 }
 
 // ── UTC conversion helper ─────────────────────────────────────────────────────
@@ -197,6 +210,19 @@ export class CalendarDB {
 		try { this.db.exec("ALTER TABLE events ADD COLUMN description TEXT NOT NULL DEFAULT ''"); } catch {}
 		try { this.db.exec("ALTER TABLE events ADD COLUMN location TEXT NOT NULL DEFAULT ''"); } catch {}
 		try { this.db.exec("ALTER TABLE events ADD COLUMN attendees_text TEXT NOT NULL DEFAULT ''"); } catch {}
+		try { this.db.exec("ALTER TABLE events ADD COLUMN pending_sync TEXT DEFAULT NULL"); } catch {}
+		this.db.exec(`
+      CREATE TABLE IF NOT EXISTS offline_queue (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation   TEXT    NOT NULL CHECK(operation IN ('create', 'update', 'delete')),
+        uid         TEXT    NOT NULL,
+        calendar_id TEXT    NOT NULL,
+        account_id  TEXT    NOT NULL,
+        href        TEXT,
+        etag        TEXT,
+        queued_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
+      );
+    `);
 	}
 
 	// ── Queries ────────────────────────────────────────────────────────────────
@@ -209,11 +235,13 @@ export class CalendarDB {
       SELECT uid, account_id as accountId, calendar_id as calendarId, etag, href, ics_path as icsPath,
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
-             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced
+             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
+             pending_sync as pendingSync
       FROM events
       WHERE calendar_id IN (${placeholders})
         AND rrule IS NULL
         AND recurrence_id IS NULL
+        AND pending_sync IS NOT 'delete'
         AND dtstart_utc < ? AND (dtend_utc > ? OR (dtend_utc IS NULL AND dtstart_utc >= ?))
     `);
 		return stmt.all(...calendarIds, endISO, startISO, startISO);
@@ -227,11 +255,13 @@ export class CalendarDB {
       SELECT uid, account_id as accountId, calendar_id as calendarId, etag, href, ics_path as icsPath,
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
-             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced
+             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
+             pending_sync as pendingSync
       FROM events
       WHERE calendar_id IN (${placeholders})
         AND rrule IS NOT NULL
         AND recurrence_id IS NULL
+        AND pending_sync IS NOT 'delete'
     `);
 		return stmt.all(...calendarIds);
 	}
@@ -242,9 +272,10 @@ export class CalendarDB {
       SELECT uid, account_id as accountId, calendar_id as calendarId, etag, href, ics_path as icsPath,
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
-             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced
+             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
+             pending_sync as pendingSync
       FROM events
-      WHERE uid = ? AND recurrence_id IS NOT NULL
+      WHERE uid = ? AND recurrence_id IS NOT NULL AND pending_sync IS NOT 'delete'
     `);
 		return stmt.all(uid);
 	}
@@ -257,10 +288,12 @@ export class CalendarDB {
       SELECT uid, account_id as accountId, calendar_id as calendarId, etag, href, ics_path as icsPath,
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
-             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced
+             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
+             pending_sync as pendingSync
       FROM events
       WHERE calendar_id IN (${placeholders})
         AND recurrence_id IS NOT NULL
+        AND pending_sync IS NOT 'delete'
     `);
 		return stmt.all(...calendarIds);
 	}
@@ -271,7 +304,8 @@ export class CalendarDB {
       SELECT uid, account_id as accountId, calendar_id as calendarId, etag, href, ics_path as icsPath,
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
-             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced
+             rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
+             pending_sync as pendingSync
       FROM events
       WHERE uid = ? AND recurrence_id IS NULL
       LIMIT 1
@@ -298,7 +332,7 @@ export class CalendarDB {
 	/** Get ETag map { href → etag } for a specific calendar (for sync diffing). */
 	getEtags(calendarId: string): Map<string, string> {
 		const stmt = this.db.prepare<{ href: string; etag: string }, string>(`
-      SELECT href, etag FROM events WHERE calendar_id = ? AND etag IS NOT NULL
+      SELECT href, etag FROM events WHERE calendar_id = ? AND etag IS NOT NULL AND pending_sync IS NOT 'create'
     `);
 		const rows = stmt.all(calendarId);
 		return new Map(rows.map((r) => [r.href, r.etag]));
@@ -314,8 +348,9 @@ export class CalendarDB {
 		calendarId: string,
 		accountId: string,
 		href: string,
-		etag: string,
+		etag: string | null,
 		icsPath: string,
+		pendingSync: string | null = null,
 	): string {
 		const dtstart = toUtcISO(event.dtstart, event.dtstartTzid, event.dtstartIsDate);
 		const dtstartUtc = iCalToUtcISOStr(event.dtstart, event.dtstartTzid, event.dtstartIsDate);
@@ -352,8 +387,8 @@ export class CalendarDB {
       INSERT INTO events
         (uid, account_id, calendar_id, etag, href, ics_path, summary, dtstart, dtend,
          dtstart_utc, dtend_utc, dtstart_is_date, rrule, exdates, recurrence_id,
-         status, organizer, description, location, attendees_text, last_synced)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         status, organizer, description, location, attendees_text, last_synced, pending_sync)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (uid, recurrence_id) DO UPDATE SET
         account_id = excluded.account_id,
         calendar_id = excluded.calendar_id,
@@ -373,7 +408,8 @@ export class CalendarDB {
         description = excluded.description,
         location = excluded.location,
         attendees_text = excluded.attendees_text,
-        last_synced = excluded.last_synced
+        last_synced = excluded.last_synced,
+        pending_sync = excluded.pending_sync
     `);
 		stmt.run(
 			event.uid,
@@ -397,6 +433,7 @@ export class CalendarDB {
 			event.location,
 			attendeesText,
 			Date.now(),
+			pendingSync,
 		);
 		return event.uid;
 	}
@@ -477,6 +514,71 @@ export class CalendarDB {
 		const paths = pathStmt.all(uid, fromUtcISO);
 		for (const { ics_path } of paths) deleteICSFile(ics_path);
 		this.db.prepare("DELETE FROM events WHERE uid = ? AND dtstart_utc >= ?").run(uid, fromUtcISO);
+	}
+
+	/** Set pending_sync on all rows for a UID (master + overrides). */
+	setPendingSync(uid: string, state: string | null): void {
+		this.db.prepare("UPDATE events SET pending_sync = ? WHERE uid = ?").run(state, uid);
+	}
+
+	/** Get all offline queue items in FIFO order. */
+	getAllQueueItems(): OfflineQueueItem[] {
+		return this.db.prepare<OfflineQueueItem, []>(`
+      SELECT id, operation, uid, calendar_id as calendarId, account_id as accountId,
+             href, etag, queued_at as queuedAt
+      FROM offline_queue ORDER BY id ASC
+    `).all();
+	}
+
+	/**
+	 * Add an item to the offline queue with deduplication:
+	 * - update while create pending → no-op (create will push latest ICS)
+	 * - update while update pending → no-op (ICS on disk is latest)
+	 * - delete replaces any existing entry for same uid
+	 */
+	addToQueue(item: Omit<OfflineQueueItem, 'id' | 'queuedAt'>): void {
+		const existing = this.db.prepare<{ id: number; operation: string }, string>(
+			"SELECT id, operation FROM offline_queue WHERE uid = ? LIMIT 1",
+		).get(item.uid);
+
+		if (existing) {
+			if (item.operation === 'update' && (existing.operation === 'create' || existing.operation === 'update')) {
+				return; // existing entry will push latest ICS from disk
+			}
+			// delete or other → replace
+			this.db.prepare("DELETE FROM offline_queue WHERE uid = ?").run(item.uid);
+		}
+
+		this.db.prepare(`
+      INSERT INTO offline_queue (operation, uid, calendar_id, account_id, href, etag)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(item.operation, item.uid, item.calendarId, item.accountId, item.href, item.etag);
+	}
+
+	/** Remove a queue item by id. */
+	removeFromQueue(id: number): void {
+		this.db.prepare("DELETE FROM offline_queue WHERE id = ?").run(id);
+	}
+
+	/** Remove all queue items for a UID. */
+	clearQueueForUid(uid: string): void {
+		this.db.prepare("DELETE FROM offline_queue WHERE uid = ?").run(uid);
+	}
+
+	/** Count of events with pending_sync not null (i.e., items in queue). */
+	getPendingCount(): number {
+		const row = this.db.query<{ count: number }, []>(
+			"SELECT COUNT(*) as count FROM offline_queue",
+		).get();
+		return row?.count ?? 0;
+	}
+
+	/** Hrefs of events with pending local changes for a calendar (for sync to skip). */
+	getPendingSyncHrefs(calendarId: string): Set<string> {
+		const rows = this.db.prepare<{ href: string | null }, string>(
+			"SELECT href FROM offline_queue WHERE calendar_id = ? AND href IS NOT NULL AND href != ''",
+		).all(calendarId);
+		return new Set(rows.filter((r) => r.href).map((r) => r.href!));
 	}
 
 	/** Close the database connection. */

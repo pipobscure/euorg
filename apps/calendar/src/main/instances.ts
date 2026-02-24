@@ -44,6 +44,8 @@ export interface EventInstance {
 	href: string;
 	icsPath: string;
 	status: string;
+	/** null = synced; 'create' | 'update' | 'delete' = pending offline push */
+	pendingSync: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -181,6 +183,7 @@ function rowToInstance(
 		href: row.href,
 		icsPath: row.icsPath,
 		status: row.status,
+		pendingSync: row.pendingSync ?? null,
 	};
 }
 
@@ -339,6 +342,7 @@ export function getInstancesInRange(
 				href: row.href,
 				icsPath: row.icsPath,
 				status: row.status,
+				pendingSync: row.pendingSync ?? null,
 			});
 		}
 
@@ -386,6 +390,7 @@ export function getInstancesInRange(
 				href: row.href,
 				icsPath: row.icsPath,
 				status: row.status,
+				pendingSync: row.pendingSync ?? null,
 			});
 		}
 

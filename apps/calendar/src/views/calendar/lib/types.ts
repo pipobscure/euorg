@@ -59,6 +59,8 @@ export interface EventInstance {
 	href: string;
 	icsPath: string;
 	status: string;
+	/** null = synced; 'create' | 'update' | 'delete' = pending offline push */
+	pendingSync: string | null;
 }
 
 export interface CalendarView {
@@ -113,11 +115,20 @@ export interface SyncProgress {
 	eventsTotal?: number;
 }
 
+export interface SyncError {
+	href: string;
+	message: string;
+	summary?: string;
+	accountId: string;
+	calendarId: string;
+}
+
 export interface SyncResult {
 	added: number;
 	updated: number;
 	deleted: number;
 	errors: string[];
+	syncErrors: SyncError[];
 }
 
 // ── Date utilities (view-side) ────────────────────────────────────────────────

@@ -34,14 +34,22 @@ import {
 	writeUpdate,
 	writeDelete,
 	writeReschedule,
+	isNetworkError,
+	saveCreateLocally,
+	saveUpdateLocally,
+	saveDeleteLocally,
+	saveRescheduleLocally,
 	rediscoverCalendars,
 	addCalendarToAccount,
 	removeCalendarFromAccount,
+	loadIgnoredSyncErrors,
+	saveIgnoredSyncErrors,
 	type RecurringEditScope,
 	type SyncProgress,
 	type SyncResult,
+	type SyncError,
 } from "./sync.ts";
-import { testConnection } from "./caldav.ts";
+import { testConnection, deleteEvent as caldavDelete } from "./caldav.ts";
 import { sendInvitation, testSmtp } from "./smtp.ts";
 
 // ── Config helpers ────────────────────────────────────────────────────────────
@@ -284,6 +292,11 @@ interface CalendarRPCSchema extends ElectrobunRPCSchema {
 				params: { query: string };
 				response: Array<{ uid: string; recurrenceId: string | null; summary: string; dtstartUtc: string; calendarId: string; color: string; calendarName: string }>;
 			};
+			acknowledgeSyncError: {
+				params: { href: string; shouldDelete: boolean; shouldIgnore: boolean; accountId: string };
+				response: void;
+			};
+			getPendingCount: { params: void; response: number };
 		};
 		messages: {};
 	}>;
@@ -370,67 +383,74 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 			},
 
 			async createEvent({ input }) {
-				try {
-					const cfg = readAccounts();
-					let accountId = "";
-					for (const a of cfg.accounts) {
-						if (a.caldav?.calendars.some((c) => c.id === input.calendarId)) {
-							accountId = a.id;
-							break;
-						}
+				const cfg = readAccounts();
+				let accountId = "";
+				for (const a of cfg.accounts) {
+					if (a.caldav?.calendars.some((c) => c.id === input.calendarId)) {
+						accountId = a.id;
+						break;
 					}
-					if (!accountId) throw new Error(`No account found for calendar ${input.calendarId}`);
-					const uid = await writeCreate(db, {
-						...input,
-						description: input.description,
-						location: input.location,
-						url: input.url,
-						rrule: input.rrule,
-						attendees: input.attendees,
-					}, input.calendarId, accountId);
-					rpc.send("eventChanged", { uid, action: "created" });
-					return { uid };
-				} catch (e) {
-					console.error("[calendar] createEvent failed:", e instanceof Error ? e.message : e);
-					throw e;
 				}
+				if (!accountId) throw new Error(`No account found for calendar ${input.calendarId}`);
+				const vInput = {
+					...input,
+					description: input.description,
+					location: input.location,
+					url: input.url,
+					rrule: input.rrule,
+					attendees: input.attendees,
+				};
+				let uid: string;
+				try {
+					uid = await writeCreate(db, vInput, input.calendarId, accountId);
+				} catch (e) {
+					if (!isNetworkError(e)) { console.error("[calendar] createEvent failed:", e instanceof Error ? e.message : e); throw e; }
+					console.log("[calendar] createEvent offline — queuing locally");
+					uid = await saveCreateLocally(db, vInput, input.calendarId, accountId);
+				}
+				rpc.send("eventChanged", { uid, action: "created" });
+				return { uid };
 			},
 
 			async updateEvent({ uid, input, scope, instanceStartISO }) {
+				const vInput = {
+					...input,
+					description: input.description,
+					location: input.location,
+					url: input.url,
+					rrule: input.rrule,
+					attendees: input.attendees,
+				};
 				try {
-					await writeUpdate(db, uid, {
-						...input,
-						description: input.description,
-						location: input.location,
-						url: input.url,
-						rrule: input.rrule,
-						attendees: input.attendees,
-					}, scope, instanceStartISO);
-					rpc.send("eventChanged", { uid, action: "updated" });
+					await writeUpdate(db, uid, vInput, scope, instanceStartISO);
 				} catch (e) {
-					console.error("[calendar] updateEvent failed:", e instanceof Error ? e.message : e);
-					throw e;
+					if (!isNetworkError(e)) { console.error("[calendar] updateEvent failed:", e instanceof Error ? e.message : e); throw e; }
+					console.log("[calendar] updateEvent offline — queuing locally");
+					await saveUpdateLocally(db, uid, vInput, scope, instanceStartISO);
 				}
+				rpc.send("eventChanged", { uid, action: "updated" });
 			},
 
 			async deleteEvent({ uid, scope, instanceStartISO }) {
 				try {
 					await writeDelete(db, uid, scope, instanceStartISO);
-					rpc.send("eventChanged", { uid, action: "deleted" });
 				} catch (e) {
-					console.error("[calendar] deleteEvent failed:", e instanceof Error ? e.message : e);
-					throw e;
+					if (!isNetworkError(e)) { console.error("[calendar] deleteEvent failed:", e instanceof Error ? e.message : e); throw e; }
+					console.log("[calendar] deleteEvent offline — queuing locally");
+					await saveDeleteLocally(db, uid, scope, instanceStartISO);
 				}
+				rpc.send("eventChanged", { uid, action: "deleted" });
 			},
 
 			async rescheduleEvent({ uid, instanceStartISO, newStartISO, scope }) {
 				try {
 					await writeReschedule(db, uid, instanceStartISO, newStartISO, scope);
-					rpc.send("eventChanged", { uid, action: "updated" });
 				} catch (e) {
-					console.error("[calendar] rescheduleEvent failed:", e instanceof Error ? e.message : e);
-					throw e;
+					if (!isNetworkError(e)) { console.error("[calendar] rescheduleEvent failed:", e instanceof Error ? e.message : e); throw e; }
+					console.log("[calendar] rescheduleEvent offline — queuing locally");
+					await saveRescheduleLocally(db, uid, instanceStartISO, newStartISO, scope);
 				}
+				rpc.send("eventChanged", { uid, action: "updated" });
 			},
 
 			async getAccounts() {
@@ -753,6 +773,38 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 						calendarName: cal?.name ?? '',
 					};
 				});
+			},
+
+			async getPendingCount() {
+				return db.getPendingCount();
+			},
+
+			async acknowledgeSyncError({ href, shouldDelete, shouldIgnore, accountId }) {
+				if (shouldIgnore) {
+					const ignored = loadIgnoredSyncErrors();
+					ignored.add(href);
+					saveIgnoredSyncErrors(ignored);
+				}
+				if (shouldDelete) {
+					try {
+						const cfg = readAccounts();
+						const account = cfg.accounts.find((a) => a.id === accountId);
+						if (account) {
+							const row = (db as any).db
+								.prepare("SELECT etag FROM events WHERE href = ? LIMIT 1")
+								.get(href);
+							const etag = row?.etag ?? "";
+							await caldavDelete(href, account.serverUrl, etag, {
+								serverUrl: account.serverUrl,
+								username: account.username,
+								password: account.password,
+							});
+						}
+					} catch {
+						// Server delete failed (e.g. already gone) — still clean up locally
+					}
+					db.deleteEventByHref(href);
+				}
 			},
 		},
 		messages: {},

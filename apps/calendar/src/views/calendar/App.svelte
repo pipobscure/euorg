@@ -7,6 +7,7 @@
 		AccountView,
 		SyncProgress,
 		SyncResult,
+		SyncError,
 		ViewMode,
 		EventInput,
 		RecurringEditScope,
@@ -28,6 +29,7 @@
 	import AccountSettings from "./components/AccountSettings.svelte";
 	import SyncStatus from "./components/SyncStatus.svelte";
 	import ImportPanel from "./components/ImportPanel.svelte";
+	import SyncErrorDialog from "./components/SyncErrorDialog.svelte";
 
 	// ── State ────────────────────────────────────────────────────────────────
 
@@ -60,6 +62,9 @@ let searchFocusTrigger = $state(0);
 	let syncProgress = $state<SyncProgress | null>(null);
 	let syncResult = $state<SyncResult | null>(null);
 	let isSyncing = $state(false);
+	let pendingSyncErrors = $state<SyncError[]>([]);
+
+	let pendingCount = $derived(instances.filter((i) => i.pendingSync !== null).length);
 
 	let notification = $state<{ message: string; type: "success" | "error" } | null>(null);
 
@@ -290,7 +295,9 @@ let searchFocusTrigger = $state(0);
 		isSyncing = false;
 		syncProgress = null;
 		loadInstances();
-		if (r.errors.length > 0) {
+		if (r.syncErrors?.length > 0) {
+			pendingSyncErrors = r.syncErrors;
+		} else if (r.errors.length > 0) {
 			showNotification(`Sync complete with ${r.errors.length} error(s)`, "error");
 		}
 	});
@@ -324,6 +331,7 @@ let searchFocusTrigger = $state(0);
 				case "d": e.preventDefault(); viewMode = "day"; break;
 				case "t": e.preventDefault(); goToday(); break;
 				case "f": e.preventDefault(); searchFocusTrigger++; break;
+				case "r": e.preventDefault(); triggerSync(); break;
 			}
 		} else {
 			switch (e.key) {
@@ -500,7 +508,7 @@ let searchFocusTrigger = $state(0);
 	</div>
 
 	<!-- Status bar: direct child of h-screen flex-col, always pinned at bottom -->
-	<SyncStatus {syncProgress} {syncResult} {isSyncing} />
+	<SyncStatus {syncProgress} {syncResult} {isSyncing} {pendingCount} />
 </div>
 
 <!-- Overlays -->
@@ -552,6 +560,13 @@ let searchFocusTrigger = $state(0);
 		{calendars}
 		onImport={handleImport}
 		onClose={() => { showImport = false; }}
+	/>
+{/if}
+
+{#if pendingSyncErrors.length > 0}
+	<SyncErrorDialog
+		errors={pendingSyncErrors}
+		onClose={() => { pendingSyncErrors = []; loadInstances(); }}
 	/>
 {/if}
 

@@ -10,7 +10,7 @@
  *   "thisAndFollowing" — truncate master RRULE (add UNTIL) + create new master with new UID
  */
 
-import { readFileSync, appendFileSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -37,7 +37,7 @@ function logSyncResult(result: SyncResult): void {
 		// Logging failure is non-fatal
 	}
 }
-import type { CalendarDB } from "./db.ts";
+import type { CalendarDB, OfflineQueueItem } from "./db.ts";
 import { writeICS, readICS } from "./db.ts";
 import {
 	parseICS,
@@ -78,11 +78,43 @@ export interface SyncProgress {
 	eventsTotal?: number;
 }
 
+export interface SyncError {
+	href: string;
+	message: string;
+	summary?: string;
+	accountId: string;
+	calendarId: string;
+}
+
 export interface SyncResult {
 	added: number;
 	updated: number;
 	deleted: number;
 	errors: string[];
+	syncErrors: SyncError[];
+}
+
+// ── Ignored sync errors ────────────────────────────────────────────────────────
+
+const IGNORED_ERRORS_PATH = join(LOG_DIR, "ignored-sync-errors.json");
+
+export function loadIgnoredSyncErrors(): Set<string> {
+	try {
+		return new Set(JSON.parse(readFileSync(IGNORED_ERRORS_PATH, "utf8")));
+	} catch {
+		return new Set();
+	}
+}
+
+export function saveIgnoredSyncErrors(hrefs: Set<string>): void {
+	mkdirSync(LOG_DIR, { recursive: true });
+	writeFileSync(IGNORED_ERRORS_PATH, JSON.stringify([...hrefs], null, 2), "utf8");
+}
+
+/** Try to extract SUMMARY from a raw ICS string without a full parse. */
+function extractSummaryFromICS(ics: string): string | undefined {
+	const m = ics.match(/^SUMMARY(?:;[^:]*)?:(.+)$/m);
+	return m ? m[1].trim() : undefined;
 }
 
 type ProgressCallback = (progress: SyncProgress) => void;
@@ -98,6 +130,23 @@ function creds(account: EuorgAccount): CalDAVCredentials {
 	};
 }
 
+// ── Network error detection ───────────────────────────────────────────────────
+
+export function isNetworkError(e: unknown): boolean {
+	if (!(e instanceof Error)) return false;
+	if (e.constructor.name === "TypeError") return true;
+	const msg = e.message.toLowerCase();
+	return (
+		msg.includes("fetch failed") ||
+		msg.includes("econnrefused") ||
+		msg.includes("enotfound") ||
+		msg.includes("etimedout") ||
+		msg.includes("network") ||
+		msg.includes("econnreset") ||
+		msg.includes("socket hang up")
+	);
+}
+
 // ── Main sync ─────────────────────────────────────────────────────────────────
 
 export async function syncAll(
@@ -107,7 +156,16 @@ export async function syncAll(
 ): Promise<SyncResult> {
 	const cfg = readAccounts();
 	const pairs = allEnabledCalendars(cfg);
-	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [] };
+	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [], syncErrors: [] };
+
+	// Flush offline queue before pulling from server
+	try {
+		const queueErrors = await processOfflineQueue(db);
+		result.errors.push(...queueErrors);
+	} catch (e) {
+		// If processOfflineQueue itself throws (e.g. network down), still try to sync
+		if (!isNetworkError(e)) result.errors.push(`Queue flush: ${e instanceof Error ? e.message : String(e)}`);
+	}
 
 	const total = pairs.length;
 	let done = 0;
@@ -140,6 +198,7 @@ export async function syncAll(
 			result.updated += r.updated;
 			result.deleted += r.deleted;
 			result.errors.push(...r.errors);
+			result.syncErrors.push(...r.syncErrors);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			result.errors.push(`${account.name} / ${calendar.name}: ${msg}`);
@@ -160,8 +219,10 @@ async function syncCalendar(
 	onEventsStored: EventsStoredCallback,
 	onEventProgress: (done: number, total: number) => void,
 ): Promise<SyncResult> {
-	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [] };
+	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [], syncErrors: [] };
 	const c = creds(account);
+	const ignoredErrors = loadIgnoredSyncErrors();
+	const pendingHrefs = db.getPendingSyncHrefs(calendar.id);
 
 	// Helper: process a batch of { href, etag, ics } items from the server
 	function storeEvents(
@@ -172,6 +233,7 @@ async function syncCalendar(
 		const processed = new Set<string>();
 		for (const { href, etag, ics } of items) {
 			processed.add(href);
+			if (pendingHrefs.has(href)) continue; // local changes pending — skip
 			const localEtag = localEtags.get(href);
 			try {
 				const parsed = parseICS(ics);
@@ -185,7 +247,17 @@ async function syncCalendar(
 				}
 				if (!localEtag) r.added++; else r.updated++;
 			} catch (e) {
-				r.errors.push(`Store ${href}: ${e instanceof Error ? e.message : String(e)}`);
+				const msg = e instanceof Error ? e.message : String(e);
+				r.errors.push(`Store ${href}: ${msg}`);
+				if (!ignoredErrors.has(href)) {
+					r.syncErrors.push({
+						href,
+						message: msg,
+						summary: extractSummaryFromICS(ics),
+						accountId: account.id,
+						calendarId: calendar.id,
+					});
+				}
 			}
 		}
 		return processed;
@@ -242,11 +314,15 @@ async function syncCalendar(
 
 	for (const [href, remoteEtag] of remoteEtags) {
 		if (phase1Hrefs.has(href)) continue; // already handled
+		if (pendingHrefs.has(href)) continue; // local changes pending — skip
 		const localEtag = localEtags.get(href);
 		if (!localEtag || localEtag !== remoteEtag) toFetch.push(href);
 	}
 	for (const [href] of localEtags) {
-		if (!remoteEtags.has(href)) toDelete.push(href);
+		if (!remoteEtags.has(href)) {
+			if (pendingHrefs.has(href)) continue; // local changes pending — skip
+			toDelete.push(href);
+		}
 	}
 
 	const eventsTotal = toFetch.length;
@@ -265,7 +341,16 @@ async function syncCalendar(
 			const isNew = !localEtags.has(href);
 			if (isNew) result.added++; else result.updated++;
 		} catch (e) {
-			result.errors.push(`Fetch ${href}: ${e instanceof Error ? e.message : String(e)}`);
+			const msg = e instanceof Error ? e.message : String(e);
+			result.errors.push(`Fetch ${href}: ${msg}`);
+			if (!ignoredErrors.has(href)) {
+				result.syncErrors.push({
+					href,
+					message: msg,
+					accountId: account.id,
+					calendarId: calendar.id,
+				});
+			}
 		}
 
 		eventsDone++;
@@ -671,6 +756,322 @@ export async function writeReschedule(
 	await writeUpdate(db, uid, input, scope, instanceStartISO);
 }
 
+// ── Offline queue processing ──────────────────────────────────────────────────
+
+/**
+ * Flush the offline queue: push each pending operation to the server.
+ * Items that fail remain in the queue for the next sync attempt.
+ * Returns an array of error strings (non-fatal).
+ */
+export async function processOfflineQueue(db: CalendarDB): Promise<string[]> {
+	const cfg = readAccounts();
+	const errors: string[] = [];
+	const queue = db.getAllQueueItems();
+
+	for (const item of queue) {
+		try {
+			const account = cfg.accounts.find((a) => a.id === item.accountId);
+			if (!account) {
+				errors.push(`Queue ${item.id}: account ${item.accountId} not found`);
+				continue;
+			}
+			const calendar = account.caldav?.calendars.find((cal) => cal.id === item.calendarId);
+			const c = creds(account);
+
+			if (item.operation === 'create') {
+				if (!calendar) { errors.push(`Queue ${item.id}: calendar ${item.calendarId} not found`); continue; }
+				const row = db.getEvent(item.uid);
+				if (!row) { db.removeFromQueue(item.id); continue; }
+				const icsText = readICS(row.icsPath);
+				if (!icsText) { errors.push(`Queue ${item.id}: cannot read ICS for ${item.uid}`); continue; }
+				const { href, etag } = await caldavCreate(calendar.url, item.uid, icsText, c);
+				const parsed = parseICS(icsText);
+				const event = parsed.events[0];
+				if (event) {
+					const path = writeICS(item.uid, null, icsText);
+					db.upsertEvent(event, item.calendarId, item.accountId, href, etag, path, null);
+				}
+				db.removeFromQueue(item.id);
+
+			} else if (item.operation === 'update') {
+				const row = db.getEvent(item.uid);
+				if (!row) { db.removeFromQueue(item.id); continue; }
+				const icsText = readICS(row.icsPath);
+				if (!icsText) { errors.push(`Queue ${item.id}: cannot read ICS for ${item.uid}`); continue; }
+				const href = item.href!;
+				const etag = item.etag ?? '';
+				let newEtag: string;
+				try {
+					newEtag = await caldavUpdate(href, account.serverUrl, icsText, etag, c);
+				} catch (err) {
+					if (err instanceof Error && err.message.startsWith('CONFLICT:')) {
+						// 412 Precondition Failed: force-push (local wins, no If-Match)
+						newEtag = await caldavUpdate(href, account.serverUrl, icsText, '', c);
+					} else {
+						throw err;
+					}
+				}
+				const parsed = parseICS(icsText);
+				for (const event of parsed.events) {
+					const path = writeICS(event.uid, event.recurrenceId, icsText);
+					db.upsertEvent(event, item.calendarId, item.accountId, href, newEtag, path, null);
+				}
+				db.removeFromQueue(item.id);
+
+			} else if (item.operation === 'delete') {
+				const row = db.getEvent(item.uid);
+				const href = item.href!;
+				const etag = item.etag ?? '';
+				if (row) {
+					try {
+						await caldavDelete(href, account.serverUrl, etag, c);
+					} catch (err) {
+						if (err instanceof Error && (err.message.includes('404') || err.message.includes('Not Found'))) {
+							// Already deleted on server
+						} else {
+							throw err;
+						}
+					}
+					db.deleteEvent(item.uid);
+				}
+				db.removeFromQueue(item.id);
+			}
+		} catch (e) {
+			errors.push(`Queue ${item.id} (${item.operation} ${item.uid}): ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	return errors;
+}
+
+// ── Local offline write helpers ───────────────────────────────────────────────
+// These mirror the server-side write* functions but only touch local storage.
+// They write/update ICS files on disk, update the SQLite DB, and enqueue the
+// operation for later delivery to the CalDAV server.
+
+export async function saveCreateLocally(
+	db: CalendarDB,
+	input: VEventInput,
+	calendarId: string,
+	accountId: string,
+): Promise<string> {
+	const uid = generateUID();
+	const vtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
+	const icsText = serializeICS({ ...input, uid }, vtimezone);
+	const path = writeICS(uid, null, icsText);
+	const parsed = parseICS(icsText);
+	const event = parsed.events[0];
+	if (event) {
+		db.upsertEvent(event, calendarId, accountId, '', null, path, 'create');
+	}
+	db.addToQueue({ operation: 'create', uid, calendarId, accountId, href: null, etag: null });
+	return uid;
+}
+
+export async function saveUpdateLocally(
+	db: CalendarDB,
+	uid: string,
+	input: VEventInput,
+	scope: RecurringEditScope,
+	instanceStartISO?: string,
+): Promise<void> {
+	const cfg = readAccounts();
+	const row = db.getEvent(uid);
+	if (!row) throw new Error(`Event ${uid} not found`);
+
+	if (scope === 'all' || !row.rrule) {
+		// If already pending-create, just update the ICS (queue entry stays as 'create')
+		if (row.pendingSync === 'create') {
+			const vtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
+			const newICS = serializeICS({ ...input, uid, sequence: getSequence(row.icsPath, uid) + 1 }, vtimezone);
+			const path = writeICS(uid, null, newICS);
+			const parsed = parseICS(newICS);
+			const event = parsed.events[0];
+			if (event) db.upsertEvent(event, row.calendarId, row.accountId, '', null, path, 'create');
+			return;
+		}
+		const vtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
+		const newICS = serializeICS({ ...input, uid, sequence: getSequence(row.icsPath, uid) + 1 }, vtimezone);
+		const path = writeICS(uid, null, newICS);
+		const parsed = parseICS(newICS);
+		const event = parsed.events[0];
+		if (event) db.upsertEvent(event, row.calendarId, row.accountId, row.href, row.etag, path, 'update');
+		db.addToQueue({ operation: 'update', uid, calendarId: row.calendarId, accountId: row.accountId, href: row.href, etag: row.etag });
+
+	} else if (scope === 'this' && instanceStartISO) {
+		const masterICS = readICS(row.icsPath);
+		if (!masterICS) throw new Error('Cannot read master ICS');
+		const masterParsed = parseICS(masterICS);
+		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId)
+			?? masterParsed.events.find((e) => !e.recurrenceId);
+		if (!master) throw new Error('Master event not found in ICS');
+
+		const recurrenceId = master.dtstartIsDate
+			? isoToICalDate(instanceStartISO)
+			: isoToICalDateTime(instanceStartISO, master.dtstartTzid);
+		const ovVtimezone = input.tzid && !input.isAllDay ? await getVTimezone(input.tzid) : undefined;
+
+		const buildCombined = (baseICS: string) => {
+			const baseParsed = parseICS(baseICS);
+			const baseMaster = baseParsed.events.find((e) => !e.recurrenceId);
+			const effectiveUID = baseMaster?.uid ?? uid;
+			const freshOverrideICS = serializeICS({
+				...input,
+				uid: effectiveUID,
+				recurrenceId,
+				sequence: (baseMaster?.sequence ?? 0) + 1,
+				method: undefined,
+				rrule: undefined,
+				exdate: undefined,
+			}, ovVtimezone);
+			const [freshOverrideVEvent] = extractVEvents(freshOverrideICS);
+			if (!freshOverrideVEvent) throw new Error('Failed to build override VEVENT');
+			const effectiveExdates = (baseMaster?.exdate ?? []).filter((ex) => ex !== recurrenceId);
+			const stripped = stripOverrideVEvents(baseICS, recurrenceId);
+			const withExdate = rebuildMasterWithExdate(stripped, effectiveUID, effectiveExdates);
+			return injectVEventIntoICS(withExdate, freshOverrideVEvent);
+		};
+
+		const combinedICS = buildCombined(masterICS);
+		const combinedPath = writeICS(uid, null, combinedICS);
+		const finalEvents = parseICS(combinedICS).events;
+		const finalMaster = finalEvents.find((e) => !e.recurrenceId);
+		const finalOverride = finalEvents.find((e) => e.recurrenceId === recurrenceId);
+		const pendingState = row.pendingSync === 'create' ? 'create' : 'update';
+		if (finalMaster) {
+			db.upsertEvent(finalMaster, row.calendarId, row.accountId, row.href, row.etag, combinedPath, pendingState);
+		}
+		if (finalOverride) {
+			db.upsertEvent(finalOverride, row.calendarId, row.accountId, row.href, row.etag, combinedPath, null);
+		}
+		if (pendingState === 'update') {
+			db.addToQueue({ operation: 'update', uid, calendarId: row.calendarId, accountId: row.accountId, href: row.href, etag: row.etag });
+		}
+
+	} else if (scope === 'thisAndFollowing' && instanceStartISO) {
+		const masterICS = readICS(row.icsPath);
+		if (!masterICS) throw new Error('Cannot read master ICS');
+		const masterParsed = parseICS(masterICS);
+		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId);
+		if (!master) throw new Error('Master event not found in ICS');
+
+		const untilStr = isoToICalDate(subtractOneDay(instanceStartISO));
+		const truncatedRRule = addUntilToRRule(master.rrule ?? '', untilStr);
+		const truncatedICS = rebuildMasterWithRRule(masterICS, uid, truncatedRRule);
+		const truncPath = writeICS(uid, null, truncatedICS);
+		const truncEvent = parseICS(truncatedICS).events[0];
+		const pendingState = row.pendingSync === 'create' ? 'create' : 'update';
+		if (truncEvent) {
+			db.upsertEvent(truncEvent, row.calendarId, row.accountId, row.href, row.etag, truncPath, pendingState);
+		}
+		db.deleteEventsFromDate(uid, new Date(instanceStartISO).toISOString().replace(/\.\d{3}Z$/, 'Z'));
+		if (pendingState === 'update') {
+			db.addToQueue({ operation: 'update', uid, calendarId: row.calendarId, accountId: row.accountId, href: row.href, etag: row.etag });
+		}
+		// Create new local event for the "following" portion
+		const newInput: VEventInput = { ...input, uid: undefined, rrule: input.rrule };
+		await saveCreateLocally(db, newInput, row.calendarId, row.accountId);
+	}
+}
+
+export async function saveDeleteLocally(
+	db: CalendarDB,
+	uid: string,
+	scope: RecurringEditScope,
+	instanceStartISO?: string,
+): Promise<void> {
+	const row = db.getEvent(uid);
+	if (!row) throw new Error(`Event ${uid} not found`);
+
+	if (scope === 'all' || !row.rrule) {
+		if (row.pendingSync === 'create') {
+			// Cancel: remove queue entry and local record entirely
+			db.clearQueueForUid(uid);
+			db.deleteEvent(uid);
+			return;
+		}
+		db.setPendingSync(uid, 'delete');
+		db.addToQueue({ operation: 'delete', uid, calendarId: row.calendarId, accountId: row.accountId, href: row.href, etag: row.etag });
+
+	} else if (scope === 'this' && instanceStartISO) {
+		const masterICS = readICS(row.icsPath);
+		if (!masterICS) throw new Error('Cannot read master ICS');
+		const masterParsed = parseICS(masterICS);
+		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId);
+		if (!master) throw new Error('Master event not found');
+		const exdateVal = master.dtstartIsDate
+			? isoToICalDate(instanceStartISO)
+			: isoToICalDateTime(instanceStartISO, master.dtstartTzid);
+		const newExdates = [...master.exdate, exdateVal];
+		const updatedMasterICS = rebuildMasterWithExdate(masterICS, uid, newExdates);
+		const masterPath = writeICS(uid, null, updatedMasterICS);
+		const masterEvent = parseICS(updatedMasterICS).events[0];
+		const pendingState = row.pendingSync === 'create' ? 'create' : 'update';
+		if (masterEvent) {
+			db.upsertEvent(masterEvent, row.calendarId, row.accountId, row.href, row.etag, masterPath, pendingState);
+		}
+		db.deleteOverride(uid, exdateVal);
+		if (pendingState === 'update') {
+			db.addToQueue({ operation: 'update', uid, calendarId: row.calendarId, accountId: row.accountId, href: row.href, etag: row.etag });
+		}
+
+	} else if (scope === 'thisAndFollowing' && instanceStartISO) {
+		const masterICS = readICS(row.icsPath);
+		if (!masterICS) throw new Error('Cannot read master ICS');
+		const masterParsed = parseICS(masterICS);
+		const master = masterParsed.events.find((e) => e.uid === uid && !e.recurrenceId);
+		if (!master) throw new Error('Master event not found');
+		const untilStr = isoToICalDate(subtractOneDay(instanceStartISO));
+		const truncatedRRule = addUntilToRRule(master.rrule ?? '', untilStr);
+		const truncatedICS = rebuildMasterWithRRule(masterICS, uid, truncatedRRule);
+		const truncPath = writeICS(uid, null, truncatedICS);
+		const truncEvent = parseICS(truncatedICS).events[0];
+		const pendingState = row.pendingSync === 'create' ? 'create' : 'update';
+		if (truncEvent) {
+			db.upsertEvent(truncEvent, row.calendarId, row.accountId, row.href, row.etag, truncPath, pendingState);
+		}
+		db.deleteEventsFromDate(uid, new Date(instanceStartISO).toISOString().replace(/\.\d{3}Z$/, 'Z'));
+		if (pendingState === 'update') {
+			db.addToQueue({ operation: 'update', uid, calendarId: row.calendarId, accountId: row.accountId, href: row.href, etag: row.etag });
+		}
+	}
+}
+
+export async function saveRescheduleLocally(
+	db: CalendarDB,
+	uid: string,
+	instanceStartISO: string,
+	newStartISO: string,
+	scope: RecurringEditScope,
+): Promise<void> {
+	const row = db.getEvent(uid);
+	if (!row) throw new Error(`Event ${uid} not found`);
+	const rawICS = readICS(row.icsPath);
+	if (!rawICS) throw new Error('Cannot read event ICS');
+	const parsed = parseICS(rawICS);
+	const ev = parsed.events.find((e) => e.uid === uid && !e.recurrenceId);
+	if (!ev) throw new Error('Event not found in ICS');
+	const startMs = new Date(instanceStartISO).getTime();
+	const endMs = ev.dtend ? new Date(ev.dtend).getTime() : startMs + 3600_000;
+	const durationMs = endMs - startMs;
+	const newEndISO = new Date(new Date(newStartISO).getTime() + durationMs).toISOString();
+	const input: VEventInput = {
+		uid,
+		summary: ev.summary,
+		description: ev.description,
+		location: ev.location,
+		url: ev.url,
+		startISO: newStartISO,
+		endISO: newEndISO,
+		isAllDay: ev.dtstartIsDate,
+		tzid: ev.dtstartTzid ?? undefined,
+		rrule: ev.rrule ?? undefined,
+		organizer: ev.organizer,
+		attendees: ev.attendees.map((a) => ({ email: a.email, cn: a.cn, role: a.role })),
+	};
+	await saveUpdateLocally(db, uid, input, scope, instanceStartISO);
+}
+
 // ── ICS string manipulation helpers ──────────────────────────────────────────
 
 function getSequence(icsPath: string, uid: string): number {
@@ -831,7 +1232,7 @@ async function syncICSSubscription(
 	account: EuorgAccount,
 	calendar: CalDavCalendar,
 ): Promise<SyncResult> {
-	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [] };
+	const result: SyncResult = { added: 0, updated: 0, deleted: 0, errors: [], syncErrors: [] };
 	try {
 		const feed = await fetchICSFeed(account.serverUrl, calendar.subscriptionEtag);
 		if (!feed) {

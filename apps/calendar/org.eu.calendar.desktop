@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Calendar
+GenericName=Calendar
+Comment=EUOrg Calendar
+Exec=/home/pip/.bin/calendar %F
+Icon=x-office-calendar
+Terminal=false
+Categories=Office;Calendar;
+MimeType=text/calendar;
+StartupNotify=true
+StartupWMClass=Calendar
+Keywords=calendar;caldav;ics;event;
