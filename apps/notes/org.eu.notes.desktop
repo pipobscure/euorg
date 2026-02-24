@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Notes
+GenericName=Notes
+Comment=EUOrg Notes — IMAP-synced note taking
+Exec=/home/pip/.bin/notes
+Icon=accessories-text-editor
+Terminal=false
+Categories=Office;TextEditor;Utility;
+StartupNotify=true
+StartupWMClass=Notes
+Keywords=notes;imap;text;writing;

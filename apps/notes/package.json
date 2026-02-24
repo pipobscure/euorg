@@ -5,10 +5,20 @@
 		"build:views": "bun scripts/build-views.ts",
 		"build:views:dev": "bun scripts/build-views.ts --dev",
 		"build": "bun run build:views && electrobun build",
-		"dev": "bun run build:views:dev && electrobun dev"
+		"dev": "bun run build:views:dev && electrobun build && electrobun dev"
 	},
 	"dependencies": {
 		"@euorg/shared": "workspace:*",
-		"electrobun": "1.13.1"
+		"@tiptap/core": "^3.20.0",
+		"@tiptap/extension-link": "^3.20.0",
+		"@tiptap/extension-placeholder": "^3.20.0",
+		"@tiptap/extension-task-item": "^3.20.0",
+		"@tiptap/extension-task-list": "^3.20.0",
+		"@tiptap/extension-typography": "^3.20.0",
+		"@tiptap/extension-underline": "^3.20.0",
+		"@tiptap/pm": "^3.20.0",
+		"@tiptap/starter-kit": "^3.20.0",
+		"electrobun": "1.13.1",
+		"imapflow": "^1.2.10"
 	}
 }

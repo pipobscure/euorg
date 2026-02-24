@@ -73,15 +73,24 @@ export interface SmtpConfig {
 	// smtpPassword is stored in the OS keystore under key "${accountId}:smtp"
 }
 
+export interface ImapConfig {
+	port: number;
+	/** true = implicit TLS (port 993), false = STARTTLS (port 143) */
+	secure: boolean;
+	/** IMAP folder where notes are stored. Default: "Notes" */
+	notesFolder: string;
+}
+
 export interface EuorgAccount {
 	id: string;
 	/**
 	 * "dav" — a CardDAV/CalDAV account (contacts + calendar sync).
 	 * "smtp" — a standalone SMTP account (for sending mail/invitations).
 	 * "subscription" — a read-only ICS feed subscription (no credentials).
+	 * "imap" — a standalone IMAP account (for notes sync).
 	 * Defaults to "dav" when absent (backward compatibility).
 	 */
-	accountType: "dav" | "smtp" | "subscription";
+	accountType: "dav" | "smtp" | "subscription" | "imap";
 	/** Human-readable display name, e.g. "mailbox.org" */
 	name: string;
 	/** Base server URL — for dav: DAV discovery root; for smtp: not used */
@@ -100,6 +109,8 @@ export interface EuorgAccount {
 	caldav?: CalDavConfig;
 	/** SMTP config — required on smtp accounts; absent on dav accounts */
 	smtp?: SmtpConfig;
+	/** IMAP config — required on imap accounts; absent on dav/smtp accounts */
+	imap?: ImapConfig;
 }
 
 export interface EuorgAccountsConfig {
