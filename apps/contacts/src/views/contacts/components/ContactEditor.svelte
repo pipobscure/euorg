@@ -92,12 +92,23 @@
 		addrSuggestionsFor = null;
 	}
 
+	function handleStreetBlur() {
+		// Dismiss suggestions when focus leaves the street input.
+		// Delayed so that onmousedown on a suggestion fires first.
+		setTimeout(() => { addrSuggestions = []; addrSuggestionsFor = null; }, 150);
+	}
+
 	let saving = $state(false);
 	let error = $state("");
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === "Escape") {
 			e.stopPropagation();
+			if (addrSuggestions.length > 0) {
+				addrSuggestions = [];
+				addrSuggestionsFor = null;
+				return;
+			}
 			onCancel();
 		} else if (e.key === "Enter" && !e.shiftKey && !saving) {
 			const tag = (e.target as HTMLElement)?.tagName;
@@ -273,6 +284,7 @@
 								placeholder="Street"
 								value={adr.street}
 								oninput={(e) => handleStreetInput(e, i)}
+								onblur={handleStreetBlur}
 							/>
 							{#if addrSuggestionsFor === i && addrSuggestions.length > 0}
 								<ul class="bg-surface-50-950 border-surface-300-700 absolute z-50 mt-1 w-full rounded-lg border shadow-lg">
