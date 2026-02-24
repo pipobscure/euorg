@@ -770,7 +770,8 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 				finally { cdb?.close(); }
 			},
 			async searchLocations({ query }) {
-				const results: LocationSuggestion[] = [];
+				const placeResults: LocationSuggestion[] = [];
+				const contactResults: LocationSuggestion[] = [];
 
 				// 1. Photon (OSM) — place name + address search
 				try {
@@ -794,7 +795,7 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 						const text = parts.join(", ");
 						if (!text) continue;
 						const [lon, lat] = f.geometry.coordinates; // GeoJSON is [lon, lat]
-						results.push({ type: "place", text, geoLat: lat, geoLon: lon });
+						placeResults.push({ type: "place", text, geoLat: lat, geoLon: lon });
 					}
 				} catch {}
 
@@ -807,23 +808,28 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 						const q = `%${query.toLowerCase()}%`;
 						const rows = cdb.query(
 							`SELECT display_name, addresses FROM contacts
-							 WHERE addresses != '[]' AND (lower(display_name) LIKE ? OR lower(addresses) LIKE ?)
+							 WHERE lower(display_name) LIKE ? OR lower(addresses) LIKE ?
 							 ORDER BY display_name COLLATE NOCASE LIMIT 10`,
 						).all(q, q) as Array<{ display_name: string; addresses: string }>;
 						for (const row of rows) {
 							let addrs: Array<{ street?: string; city?: string; region?: string; postcode?: string; country?: string }> = [];
 							try { addrs = JSON.parse(row.addresses); } catch {}
-							for (const a of addrs) {
-								const parts = [a.street, a.city, a.region, a.postcode, a.country].filter(Boolean);
-								if (!parts.length) continue;
-								const text = `${row.display_name}, ${parts.join(", ")}`;
-								results.push({ type: "contact", text });
+							if (addrs.length === 0) {
+								// Contact matched by name but has no stored address — show name as freeform location
+								contactResults.push({ type: "contact", text: row.display_name });
+							} else {
+								for (const a of addrs) {
+									const parts = [a.street, a.city, a.region, a.postcode, a.country].filter(Boolean);
+									if (!parts.length) continue;
+									const text = `${row.display_name}, ${parts.join(", ")}`;
+									contactResults.push({ type: "contact", text });
+								}
 							}
 						}
-					} catch {} finally { cdb?.close(); }
+					} catch (e) { console.error('[searchLocations] contacts DB error:', e); } finally { cdb?.close(); }
 				}
 
-				return results;
+				return [...contactResults, ...placeResults];
 			},
 
 			async geocodeLocation({ text }) {

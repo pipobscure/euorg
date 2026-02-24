@@ -382,10 +382,10 @@ export class CalendarDB {
 
 		// SQLite treats NULL != NULL in composite primary keys, so ON CONFLICT (uid, recurrence_id)
 		// never fires when recurrence_id IS NULL, allowing duplicate non-override rows.
-		// Manually delete any existing non-override row with the same UID before upserting.
+		// Delete ALL existing non-override rows for this uid before inserting the fresh one.
 		if (!event.recurrenceId) {
-			this.db.prepare("DELETE FROM events WHERE uid = ? AND recurrence_id IS NULL AND href != ?")
-				.run(event.uid, href);
+			this.db.prepare("DELETE FROM events WHERE uid = ? AND recurrence_id IS NULL")
+				.run(event.uid);
 		}
 
 		const attendeesText = event.attendees.map((a) => `${a.cn} ${a.email}`).join(' ');

@@ -47,12 +47,9 @@
 
 	const mapSearchUrl = $derived.by(() => {
 		if (!addressLocation) return null;
-		// Prefer stored geocoordinates — shows an exact pin instead of a text search
-		if (instance.geoLat != null && instance.geoLon != null) {
-			const lat = instance.geoLat, lon = instance.geoLon;
-			return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
-		}
-		return `https://www.openstreetmap.org/search?query=${encodeURIComponent(addressLocation)}`;
+		if (instance.geoLat == null || instance.geoLon == null) return null;
+		const lat = instance.geoLat, lon = instance.geoLon;
+		return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
 	});
 
 	const osmDirectionsUrl = $derived.by(() => {
@@ -244,8 +241,8 @@
 			</button>
 		{/if}
 
-		<!-- View on map button (shown when location is an address, not a URL) -->
-		{#if addressLocation}
+		<!-- View on map button (shown only when geocoordinates are stored) -->
+		{#if mapSearchUrl}
 			<button
 				onclick={openMap}
 				class="mb-3 flex w-full items-center justify-center gap-2 rounded-lg bg-primary-500 px-3 py-2 text-sm font-semibold text-white hover:bg-primary-600 active:bg-primary-700"
