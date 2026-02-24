@@ -63,6 +63,10 @@ export interface EventRow {
 	lastSynced: number;
 	/** null = synced; 'create' | 'update' | 'delete' = pending offline push */
 	pendingSync: string | null;
+	/** GEO property latitude (RFC 5545 §3.8.1.6), null if not present */
+	geoLat: number | null;
+	/** GEO property longitude, null if not present */
+	geoLon: number | null;
 }
 
 export interface OfflineQueueItem {
@@ -211,6 +215,8 @@ export class CalendarDB {
 		try { this.db.exec("ALTER TABLE events ADD COLUMN location TEXT NOT NULL DEFAULT ''"); } catch {}
 		try { this.db.exec("ALTER TABLE events ADD COLUMN attendees_text TEXT NOT NULL DEFAULT ''"); } catch {}
 		try { this.db.exec("ALTER TABLE events ADD COLUMN pending_sync TEXT DEFAULT NULL"); } catch {}
+		try { this.db.exec("ALTER TABLE events ADD COLUMN geo_lat REAL DEFAULT NULL"); } catch {}
+		try { this.db.exec("ALTER TABLE events ADD COLUMN geo_lon REAL DEFAULT NULL"); } catch {}
 		this.db.exec(`
       CREATE TABLE IF NOT EXISTS offline_queue (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,7 +242,7 @@ export class CalendarDB {
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
              rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
-             pending_sync as pendingSync
+             pending_sync as pendingSync, geo_lat as geoLat, geo_lon as geoLon
       FROM events
       WHERE calendar_id IN (${placeholders})
         AND rrule IS NULL
@@ -256,7 +262,7 @@ export class CalendarDB {
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
              rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
-             pending_sync as pendingSync
+             pending_sync as pendingSync, geo_lat as geoLat, geo_lon as geoLon
       FROM events
       WHERE calendar_id IN (${placeholders})
         AND rrule IS NOT NULL
@@ -273,7 +279,7 @@ export class CalendarDB {
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
              rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
-             pending_sync as pendingSync
+             pending_sync as pendingSync, geo_lat as geoLat, geo_lon as geoLon
       FROM events
       WHERE uid = ? AND recurrence_id IS NOT NULL AND pending_sync IS NOT 'delete'
     `);
@@ -289,7 +295,7 @@ export class CalendarDB {
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
              rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
-             pending_sync as pendingSync
+             pending_sync as pendingSync, geo_lat as geoLat, geo_lon as geoLon
       FROM events
       WHERE calendar_id IN (${placeholders})
         AND recurrence_id IS NOT NULL
@@ -305,7 +311,7 @@ export class CalendarDB {
              summary, dtstart, dtend, dtstart_utc as dtstartUtc, dtend_utc as dtendUtc,
              dtstart_is_date as dtstartIsDate,
              rrule, exdates, recurrence_id as recurrenceId, status, organizer, last_synced as lastSynced,
-             pending_sync as pendingSync
+             pending_sync as pendingSync, geo_lat as geoLat, geo_lon as geoLon
       FROM events
       WHERE uid = ? AND recurrence_id IS NULL
       LIMIT 1
@@ -387,8 +393,9 @@ export class CalendarDB {
       INSERT INTO events
         (uid, account_id, calendar_id, etag, href, ics_path, summary, dtstart, dtend,
          dtstart_utc, dtend_utc, dtstart_is_date, rrule, exdates, recurrence_id,
-         status, organizer, description, location, attendees_text, last_synced, pending_sync)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         status, organizer, description, location, attendees_text, last_synced, pending_sync,
+         geo_lat, geo_lon)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (uid, recurrence_id) DO UPDATE SET
         account_id = excluded.account_id,
         calendar_id = excluded.calendar_id,
@@ -409,7 +416,9 @@ export class CalendarDB {
         location = excluded.location,
         attendees_text = excluded.attendees_text,
         last_synced = excluded.last_synced,
-        pending_sync = excluded.pending_sync
+        pending_sync = excluded.pending_sync,
+        geo_lat = excluded.geo_lat,
+        geo_lon = excluded.geo_lon
     `);
 		stmt.run(
 			event.uid,
@@ -434,6 +443,8 @@ export class CalendarDB {
 			attendeesText,
 			Date.now(),
 			pendingSync,
+			event.geoLat ?? null,
+			event.geoLon ?? null,
 		);
 		return event.uid;
 	}

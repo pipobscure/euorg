@@ -161,6 +161,15 @@ interface EventInput {
 	tzid?: string;
 	rrule?: string;
 	attendees?: Array<{ email: string; cn?: string; role?: string }>;
+	geoLat?: number;
+	geoLon?: number;
+}
+
+interface LocationSuggestion {
+	type: "place" | "contact";
+	text: string;
+	geoLat?: number;
+	geoLon?: number;
 }
 
 function toAccountView(a: EuorgAccount): AccountView {
@@ -288,6 +297,8 @@ interface CalendarRPCSchema extends ElectrobunRPCSchema {
 			getKeystoreType: { params: void; response: KeystoreType };
 			setKeystoreType: { params: { type: KeystoreType }; response: void };
 			searchContacts: { params: { query: string }; response: Array<{ email: string; cn: string }> };
+			searchLocations: { params: { query: string }; response: LocationSuggestion[] };
+			geocodeLocation: { params: { text: string }; response: { lat: number; lon: number } | null };
 			searchEvents: {
 				params: { query: string };
 				response: Array<{ uid: string; recurrenceId: string | null; summary: string; dtstartUtc: string; calendarId: string; color: string; calendarName: string }>;
@@ -758,6 +769,78 @@ const rpc = BrowserView.defineRPC<CalendarRPCSchema>({
 				} catch { return []; }
 				finally { cdb?.close(); }
 			},
+			async searchLocations({ query }) {
+				const results: LocationSuggestion[] = [];
+
+				// 1. Photon (OSM) — place name + address search
+				try {
+					const res = await fetch(
+						`https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=5`,
+						{ headers: { "User-Agent": "euorg-calendar/1.0" }, signal: AbortSignal.timeout(3000) },
+					);
+					const data = await res.json() as {
+						features: Array<{
+							geometry: { coordinates: [number, number] };
+							properties: {
+								name?: string; street?: string; housenumber?: string;
+								city?: string; state?: string; country?: string; postcode?: string;
+							};
+						}>;
+					};
+					for (const f of data.features ?? []) {
+						const p = f.properties;
+						const street = p.housenumber ? `${p.street ?? ""} ${p.housenumber}`.trim() : p.street;
+						const parts = [p.name, street, p.city, p.state, p.country].filter(Boolean);
+						const text = parts.join(", ");
+						if (!text) continue;
+						const [lon, lat] = f.geometry.coordinates; // GeoJSON is [lon, lat]
+						results.push({ type: "place", text, geoLat: lat, geoLon: lon });
+					}
+				} catch {}
+
+				// 2. Contacts address book — last step
+				const contactsDbPath = join(homedir(), ".euorg", "contacts", "contacts.db");
+				if (existsSync(contactsDbPath)) {
+					let cdb: Database | null = null;
+					try {
+						cdb = new Database(contactsDbPath, { readonly: true });
+						const q = `%${query.toLowerCase()}%`;
+						const rows = cdb.query(
+							`SELECT display_name, addresses FROM contacts
+							 WHERE addresses != '[]' AND (lower(display_name) LIKE ? OR lower(addresses) LIKE ?)
+							 ORDER BY display_name COLLATE NOCASE LIMIT 10`,
+						).all(q, q) as Array<{ display_name: string; addresses: string }>;
+						for (const row of rows) {
+							let addrs: Array<{ street?: string; city?: string; region?: string; postcode?: string; country?: string }> = [];
+							try { addrs = JSON.parse(row.addresses); } catch {}
+							for (const a of addrs) {
+								const parts = [a.street, a.city, a.region, a.postcode, a.country].filter(Boolean);
+								if (!parts.length) continue;
+								const text = `${row.display_name}, ${parts.join(", ")}`;
+								results.push({ type: "contact", text });
+							}
+						}
+					} catch {} finally { cdb?.close(); }
+				}
+
+				return results;
+			},
+
+			async geocodeLocation({ text }) {
+				try {
+					const res = await fetch(
+						`https://photon.komoot.io/api/?q=${encodeURIComponent(text)}&limit=1`,
+						{ headers: { "User-Agent": "euorg-calendar/1.0" }, signal: AbortSignal.timeout(3000) },
+					);
+					const data = await res.json() as { features: Array<{ geometry: { coordinates: [number, number] } }> };
+					if (!data.features?.length) return null;
+					const [lon, lat] = data.features[0].geometry.coordinates;
+					return { lat, lon };
+				} catch {
+					return null;
+				}
+			},
+
 			async searchEvents({ query }) {
 				const calMap = buildCalendarMap();
 				const rows = db.searchEvents(query);

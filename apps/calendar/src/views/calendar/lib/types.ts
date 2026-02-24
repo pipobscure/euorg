@@ -61,6 +61,10 @@ export interface EventInstance {
 	status: string;
 	/** null = synced; 'create' | 'update' | 'delete' = pending offline push */
 	pendingSync: string | null;
+	/** GEO latitude from RFC 5545 GEO property, null if not present */
+	geoLat: number | null;
+	/** GEO longitude from RFC 5545 GEO property, null if not present */
+	geoLon: number | null;
 }
 
 export interface CalendarView {
@@ -103,6 +107,18 @@ export interface EventInput {
 	tzid?: string;
 	rrule?: string;
 	attendees?: Array<{ email: string; cn?: string; role?: string }>;
+	/** Geocoordinates to store as RFC 5545 GEO property */
+	geoLat?: number;
+	geoLon?: number;
+}
+
+export interface LocationSuggestion {
+	/** 'place' = from OSM/Photon; 'contact' = from contacts address book */
+	type: "place" | "contact";
+	/** Full display string shown in the dropdown */
+	text: string;
+	geoLat?: number;
+	geoLon?: number;
 }
 
 export interface SyncProgress {

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, untrack } from "svelte";
-	import type { EventInstance, CalendarView, EventInput, RecurringEditScope } from "../lib/types.ts";
+	import type { EventInstance, CalendarView, EventInput, RecurringEditScope, LocationSuggestion } from "../lib/types.ts";
 	import { toDateStr, parseISO } from "../lib/types.ts";
 	import { rpc } from "../lib/rpc.ts";
 	import DatePicker from "./DatePicker.svelte";
@@ -48,6 +48,8 @@
 	let summary = $state(instance?.summary ?? "");
 	let description = $state("");
 	let location = $state("");
+	let geoLat = $state<number | null>(instance?.geoLat ?? null);
+	let geoLon = $state<number | null>(instance?.geoLon ?? null);
 	let url = $state("");
 	let isAllDay = $state(instance?.isAllDay ?? false);
 
@@ -136,13 +138,26 @@
 		}
 	}
 
-	function handleSave() {
+	async function handleSave() {
+		let resolvedGeoLat = geoLat;
+		let resolvedGeoLon = geoLon;
+
+		// Attempt to geocode freeform text if no geo was selected from the dropdown
+		if (location.trim() && resolvedGeoLat == null) {
+			try {
+				const geo = await rpc.request.geocodeLocation({ text: location.trim() });
+				if (geo) { resolvedGeoLat = geo.lat; resolvedGeoLon = geo.lon; }
+			} catch {}
+		}
+
 		const input: EventInput = {
 			uid: instance?.uid,
 			calendarId,
 			summary: summary.trim(),
 			description: description.trim() || undefined,
 			location: location.trim() || undefined,
+			geoLat: resolvedGeoLat ?? undefined,
+			geoLon: resolvedGeoLon ?? undefined,
 			url: url.trim() || undefined,
 			startISO: isAllDay ? startDate : `${startDate}T${startTime}:00`,
 			endISO: isAllDay ? endDate : `${endDate}T${endTime}:00`,
@@ -161,6 +176,44 @@
 	function removeAttendee(i: number) {
 		attendees = attendees.filter((_, idx) => idx !== i);
 		if (suggestionsFor === i) suggestionsFor = null;
+	}
+
+	// ── Location autocomplete ─────────────────────────────────────────────────
+
+	let locationSuggestions = $state<LocationSuggestion[]>([]);
+	let locationDropdownOpen = $state(false);
+	let locationSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function handleLocationInput(e: Event) {
+		const q = (e.target as HTMLInputElement).value;
+		location = q;
+		geoLat = null;
+		geoLon = null;
+		if (locationSearchTimer) clearTimeout(locationSearchTimer);
+		if (q.trim().length < 2) { locationSuggestions = []; locationDropdownOpen = false; return; }
+		locationSearchTimer = setTimeout(async () => {
+			try {
+				const results = await rpc.request.searchLocations({ query: q.trim() });
+				locationSuggestions = results;
+				locationDropdownOpen = results.length > 0;
+			} catch {
+				locationSuggestions = [];
+				locationDropdownOpen = false;
+			}
+		}, 300);
+	}
+
+	function selectLocationSuggestion(sug: LocationSuggestion) {
+		location = sug.text;
+		geoLat = sug.geoLat ?? null;
+		geoLon = sug.geoLon ?? null;
+		locationSuggestions = [];
+		locationDropdownOpen = false;
+	}
+
+	function handleLocationBlur() {
+		// Small delay so clicks on dropdown items register before we close
+		setTimeout(() => { locationDropdownOpen = false; }, 150);
 	}
 
 	// ── Attendee autocomplete ─────────────────────────────────────────────────
@@ -334,7 +387,37 @@
 			<!-- Location -->
 			<div class="flex items-center gap-3">
 				<label class="w-20 shrink-0 text-sm text-surface-600-400">Location</label>
-				<input type="text" bind:value={location} placeholder="Add location" class="input flex-1 text-sm py-1.5" />
+				<div class="relative flex-1">
+					<input
+						type="text"
+						value={location}
+						oninput={handleLocationInput}
+						onblur={handleLocationBlur}
+						placeholder="Add location"
+						class="input w-full text-sm py-1.5"
+					/>
+					{#if geoLat != null}
+						<span class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-success-500" title="Geocoordinates saved">📍</span>
+					{/if}
+					{#if locationDropdownOpen && locationSuggestions.length > 0}
+						<ul class="absolute left-0 top-full z-50 mt-0.5 w-full rounded-lg border border-surface-200-800 bg-surface-50-950 shadow-lg overflow-hidden max-h-48 overflow-y-auto">
+							{#each locationSuggestions as sug}
+								<li>
+									<button
+										type="button"
+										class="flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-surface-100-900"
+										onmousedown={(e) => { e.preventDefault(); selectLocationSuggestion(sug); }}
+									>
+										<span class="mt-0.5 shrink-0 text-xs {sug.type === 'contact' ? 'text-secondary-500' : 'text-primary-500'}">
+											{sug.type === 'contact' ? '👤' : '📍'}
+										</span>
+										<span class="min-w-0 break-words">{sug.text}</span>
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
 			</div>
 
 			<!-- Meeting URL -->

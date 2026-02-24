@@ -46,6 +46,10 @@ export interface EventInstance {
 	status: string;
 	/** null = synced; 'create' | 'update' | 'delete' = pending offline push */
 	pendingSync: string | null;
+	/** GEO latitude from RFC 5545 GEO property, null if not present */
+	geoLat: number | null;
+	/** GEO longitude from RFC 5545 GEO property, null if not present */
+	geoLon: number | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -184,6 +188,8 @@ function rowToInstance(
 		icsPath: row.icsPath,
 		status: row.status,
 		pendingSync: row.pendingSync ?? null,
+		geoLat: row.geoLat ?? null,
+		geoLon: row.geoLon ?? null,
 	};
 }
 
@@ -343,6 +349,8 @@ export function getInstancesInRange(
 				icsPath: row.icsPath,
 				status: row.status,
 				pendingSync: row.pendingSync ?? null,
+				geoLat: row.geoLat ?? null,
+				geoLon: row.geoLon ?? null,
 			});
 		}
 
@@ -391,6 +399,8 @@ export function getInstancesInRange(
 				icsPath: row.icsPath,
 				status: row.status,
 				pendingSync: row.pendingSync ?? null,
+				geoLat: row.geoLat ?? null,
+				geoLon: row.geoLon ?? null,
 			});
 		}
 

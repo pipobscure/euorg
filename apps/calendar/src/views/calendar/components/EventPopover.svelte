@@ -45,11 +45,15 @@
 		return loc;
 	});
 
-	const mapSearchUrl = $derived(
-		addressLocation
-			? `https://www.openstreetmap.org/search?query=${encodeURIComponent(addressLocation)}`
-			: null,
-	);
+	const mapSearchUrl = $derived.by(() => {
+		if (!addressLocation) return null;
+		// Prefer stored geocoordinates — shows an exact pin instead of a text search
+		if (instance.geoLat != null && instance.geoLon != null) {
+			const lat = instance.geoLat, lon = instance.geoLon;
+			return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
+		}
+		return `https://www.openstreetmap.org/search?query=${encodeURIComponent(addressLocation)}`;
+	});
 
 	const osmDirectionsUrl = $derived.by(() => {
 		if (!travelInfo || !addressLocation) return null;

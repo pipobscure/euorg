@@ -113,6 +113,15 @@ export class ContactsDB {
 			console.log("[db] Migrated: added pending_sync column to contacts.");
 		}
 
+		// Add addresses column for cross-app location lookup (calendar etc.)
+		const hasAddresses = this.db
+			.query("SELECT name FROM pragma_table_info('contacts') WHERE name='addresses'")
+			.get();
+		if (!hasAddresses) {
+			this.db.run("ALTER TABLE contacts ADD COLUMN addresses TEXT NOT NULL DEFAULT '[]'");
+			console.log("[db] Migrated: added addresses column to contacts.");
+		}
+
 		this.db.run(`
 			CREATE VIRTUAL TABLE IF NOT EXISTS contacts_fts USING fts5(
 				uid UNINDEXED,
@@ -251,19 +260,20 @@ export class ContactsDB {
 		const dn = displayName(card);
 		const emails = JSON.stringify(card.emails);
 		const phones = JSON.stringify(card.phones);
+		const addresses = JSON.stringify(card.addresses ?? []);
 		const ps = pendingSync !== undefined ? pendingSync : null;
 
 		this.db.run(
 			`INSERT INTO contacts
-			   (uid, account_id, collection_id, etag, href, vcf_path, display_name, emails, phones, org, last_synced, pending_sync)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   (uid, account_id, collection_id, etag, href, vcf_path, display_name, emails, phones, addresses, org, last_synced, pending_sync)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(uid) DO UPDATE SET
 			   collection_id=excluded.collection_id, account_id=excluded.account_id,
 			   etag=excluded.etag, href=excluded.href, vcf_path=excluded.vcf_path,
 			   display_name=excluded.display_name, emails=excluded.emails,
-			   phones=excluded.phones, org=excluded.org, last_synced=excluded.last_synced,
-			   pending_sync=excluded.pending_sync`,
-			[card.uid, accountId, collectionId, etag, href, vcfPath, dn, emails, phones, card.org || null, Date.now(), ps],
+			   phones=excluded.phones, addresses=excluded.addresses, org=excluded.org,
+			   last_synced=excluded.last_synced, pending_sync=excluded.pending_sync`,
+			[card.uid, accountId, collectionId, etag, href, vcfPath, dn, emails, phones, addresses, card.org || null, Date.now(), ps],
 		);
 		return vcfPath;
 	}

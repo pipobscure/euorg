@@ -60,6 +60,10 @@ export interface ICalEvent {
 	sequence: number;
 	created: string;
 	lastModified: string;
+	/** GEO property latitude (RFC 5545 §3.8.1.6) */
+	geoLat: number | null;
+	/** GEO property longitude */
+	geoLon: number | null;
 	/** Full raw VEVENT block for round-trip fidelity */
 	raw: string;
 }
@@ -102,6 +106,10 @@ export interface VEventInput {
 	existingAttendees?: ICalAttendee[];
 	/** RECURRENCE-ID for override instances (iCal datetime string, e.g. "20260222T100000Z") */
 	recurrenceId?: string;
+	/** GEO latitude (RFC 5545 §3.8.1.6) */
+	geoLat?: number;
+	/** GEO longitude */
+	geoLon?: number;
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -212,6 +220,8 @@ function parseVEvent(lines: string[]): ICalEvent {
 		sequence: 0,
 		created: "",
 		lastModified: "",
+		geoLat: null,
+		geoLon: null,
 		raw,
 	};
 
@@ -242,6 +252,19 @@ function parseVEvent(lines: string[]): ICalEvent {
 			case "LOCATION":
 				event.location = decodeText(value);
 				break;
+			case "GEO": {
+				// RFC 5545 §3.8.1.6: GEO:lat;lon (semicolon-separated decimals)
+				const parts = value.split(";");
+				if (parts.length === 2) {
+					const lat = parseFloat(parts[0]);
+					const lon = parseFloat(parts[1]);
+					if (!isNaN(lat) && !isNaN(lon)) {
+						event.geoLat = lat;
+						event.geoLon = lon;
+					}
+				}
+				break;
+			}
 			case "URL":
 				event.url = value.trim();
 				break;
@@ -543,6 +566,7 @@ export function serializeICS(input: VEventInput, vtimezone?: string): string {
 
 	if (input.description) lines.push(`DESCRIPTION:${encodeText(input.description)}`);
 	if (input.location) lines.push(`LOCATION:${encodeText(input.location)}`);
+	if (input.geoLat != null && input.geoLon != null) lines.push(`GEO:${input.geoLat};${input.geoLon}`);
 	if (input.url) lines.push(`URL:${input.url}`);
 
 	if (input.isAllDay) {
@@ -608,6 +632,8 @@ export function updateEventInICS(
 		summary: updates.summary ?? ev.summary,
 		description: updates.description ?? ev.description,
 		location: updates.location ?? ev.location,
+		geoLat: updates.geoLat !== undefined ? updates.geoLat : ev.geoLat ?? undefined,
+		geoLon: updates.geoLon !== undefined ? updates.geoLon : ev.geoLon ?? undefined,
 		url: updates.url ?? ev.url,
 		startISO: updates.startISO ?? ev.dtstart,
 		endISO: updates.endISO ?? ev.dtend ?? ev.dtstart,
