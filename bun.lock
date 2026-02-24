@@ -33,6 +33,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@euorg/shared": "workspace:*",
+        "@pipobscure/vcard": "^1.0.1",
         "@pipobscure/xml": "^1.0.3",
         "electrobun": "1.13.1",
       },
@@ -98,6 +99,8 @@
     "@malept/cross-spawn-promise": ["@malept/cross-spawn-promise@1.1.1", "", { "dependencies": { "cross-spawn": "^7.0.1" } }, "sha512-RTBGWL5FWQcg9orDOCcp4LvItNzUPcyEU9bwaeJX0rJ1IQxzucC48Y0/sQLp/g6t99IQgAlGIaesJS+gTn7tVQ=="],
 
     "@pinojs/redact": ["@pinojs/redact@0.4.0", "", {}, "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg=="],
+
+    "@pipobscure/vcard": ["@pipobscure/vcard@1.0.1", "", {}, "sha512-Z8qiLMCdopQUbSaZyHehLYBFg8nRY6CIMX65Fvi+d6e8972c2QyV4EgIpDX3YmJwzr+A/bP7Fuc5gL8Stp4xSQ=="],
 
     "@pipobscure/xml": ["@pipobscure/xml@1.0.3", "", {}, "sha512-HN7h2ev+DBT7G+8j5aQAmI2Klm6CGsGTyORVa60qn0KllbNXnH23aB/+zmbNfU4boLQ3B6EjvYwZY3MFsvB7tA=="],
 

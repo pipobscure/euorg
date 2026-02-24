@@ -1,17 +1,37 @@
 /**
- * vCard v4.0 parser and serializer.
- * Handles the subset of fields used by this app.
- * Spec: RFC 6350
+ * vCard adapter — wraps @pipobscure/vcard for use within this app.
+ *
+ * Exposes the same interface as before (VCard, VCardInput, parseVCard,
+ * serializeVCard, displayName, mergeVCards) so callers need no changes.
  */
+
+import {
+	VCard as LibVCard,
+	FNProperty,
+	NProperty,
+	EmailProperty,
+	TelProperty,
+	AdrProperty,
+	OrgProperty,
+	TitleProperty,
+	BDayProperty,
+	NoteProperty,
+	PhotoProperty,
+	UIDProperty,
+	RevProperty,
+	GeoProperty,
+} from "@pipobscure/vcard";
+
+// ── App-internal types ─────────────────────────────────────────────────────
 
 export interface VCardEmail {
 	value: string;
-	type: string; // "work" | "home" | ""
+	type: string;
 }
 
 export interface VCardPhone {
 	value: string;
-	type: string; // "cell" | "work" | "home" | "voice" | ""
+	type: string;
 }
 
 export interface VCardAddress {
@@ -20,14 +40,14 @@ export interface VCardAddress {
 	region: string;
 	postcode: string;
 	country: string;
-	type: string; // "home" | "work" | ""
+	type: string;
 	geoLat?: number;
 	geoLon?: number;
 }
 
 export interface VCard {
 	uid: string;
-	fn: string; // formatted/display name
+	fn: string;
 	firstName: string;
 	lastName: string;
 	middleName: string;
@@ -41,244 +61,8 @@ export interface VCard {
 	birthday: string; // ISO date YYYY-MM-DD or ""
 	note: string;
 	photo: string; // data URI or URL or ""
-	rev: string; // revision timestamp
-	raw: string; // original raw vCard text
-}
-
-// ── Parser ────────────────────────────────────────────────────────────────────
-
-/** Unfold continuation lines (RFC 6350 §3.2) */
-function unfold(text: string): string {
-	return text.replace(/\r?\n[ \t]/g, "");
-}
-
-/** Split a property line into name+params and value */
-function splitLine(line: string): { name: string; params: string[]; value: string } {
-	const colonIdx = line.indexOf(":");
-	if (colonIdx < 0) return { name: line, params: [], value: "" };
-
-	const left = line.slice(0, colonIdx);
-	const value = line.slice(colonIdx + 1);
-
-	const parts = left.split(";");
-	const name = parts[0].toUpperCase();
-	const params = parts.slice(1).map((p) => p.toUpperCase());
-
-	return { name, params, value };
-}
-
-/** Extract a TYPE parameter value from the params array */
-function getType(params: string[]): string {
-	for (const p of params) {
-		if (p.startsWith("TYPE=")) {
-			// May be TYPE=work or TYPE=WORK or TYPE=work,cell
-			const types = p.slice(5).toLowerCase().split(",");
-			// Return first recognizable type
-			for (const t of types) {
-				if (["work", "home", "cell", "voice", "text", "fax", "pager"].includes(t)) {
-					return t;
-				}
-			}
-		}
-	}
-	return "";
-}
-
-/** Decode a vCard value: unescape \n \, \; \: */
-function decodeValue(v: string): string {
-	return v
-		.replace(/\\n/gi, "\n")
-		.replace(/\\,/g, ",")
-		.replace(/\\;/g, ";")
-		.replace(/\\:/g, ":");
-}
-
-/** Parse N property: Last;First;Middle;Prefix;Suffix */
-function parseN(value: string): {
-	lastName: string;
-	firstName: string;
-	middleName: string;
-	prefix: string;
-	suffix: string;
-} {
-	const parts = value.split(";").map((p) => decodeValue(p.trim()));
-	return {
-		lastName: parts[0] ?? "",
-		firstName: parts[1] ?? "",
-		middleName: parts[2] ?? "",
-		prefix: parts[3] ?? "",
-		suffix: parts[4] ?? "",
-	};
-}
-
-/** Parse ADR property: POBox;Extended;Street;City;Region;Postcode;Country */
-function parseADR(value: string, params: string[]): VCardAddress {
-	const parts = value.split(";").map((p) => decodeValue(p.trim()));
-	return {
-		street: parts[2] ?? "",
-		city: parts[3] ?? "",
-		region: parts[4] ?? "",
-		postcode: parts[5] ?? "",
-		country: parts[6] ?? "",
-		type: getType(params),
-	};
-}
-
-/** Decode BDAY: 19800101 or 1980-01-01 → YYYY-MM-DD */
-function parseBday(value: string): string {
-	const v = value.trim();
-	if (/^\d{8}$/.test(v)) {
-		return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`;
-	}
-	if (/^\d{4}-\d{2}-\d{2}/.test(v)) {
-		return v.slice(0, 10);
-	}
-	return v;
-}
-
-export function parseVCard(raw: string): VCard {
-	const text = unfold(raw);
-	const lines = text.split(/\r?\n/).filter((l) => l.trim());
-
-	const card: VCard = {
-		uid: "",
-		fn: "",
-		firstName: "",
-		lastName: "",
-		middleName: "",
-		prefix: "",
-		suffix: "",
-		emails: [],
-		phones: [],
-		addresses: [],
-		org: "",
-		title: "",
-		birthday: "",
-		note: "",
-		photo: "",
-		rev: "",
-		raw,
-	};
-
-	for (const line of lines) {
-		if (line === "BEGIN:VCARD" || line === "END:VCARD") continue;
-
-		const { name, params, value } = splitLine(line);
-
-		switch (name) {
-			case "UID":
-				card.uid = decodeValue(value).trim();
-				break;
-			case "FN":
-				card.fn = decodeValue(value).trim();
-				break;
-			case "N": {
-				const n = parseN(value);
-				card.lastName = n.lastName;
-				card.firstName = n.firstName;
-				card.middleName = n.middleName;
-				card.prefix = n.prefix;
-				card.suffix = n.suffix;
-				if (!card.fn && (card.firstName || card.lastName)) {
-					card.fn = [card.firstName, card.lastName].filter(Boolean).join(" ");
-				}
-				break;
-			}
-			case "EMAIL":
-				if (value.trim()) {
-					card.emails.push({ value: decodeValue(value).trim(), type: getType(params) });
-				}
-				break;
-			case "TEL":
-				if (value.trim()) {
-					card.phones.push({ value: decodeValue(value).trim(), type: getType(params) });
-				}
-				break;
-			case "ADR":
-				card.addresses.push(parseADR(value, params));
-				break;
-			case "ORG":
-				// ORG can be multi-component: OrgName;Unit
-				card.org = decodeValue(value.split(";")[0]).trim();
-				break;
-			case "TITLE":
-				card.title = decodeValue(value).trim();
-				break;
-			case "BDAY":
-				card.birthday = parseBday(value);
-				break;
-			case "NOTE":
-				card.note = decodeValue(value).trim();
-				break;
-			case "PHOTO": {
-				const rawVal = value.trim();
-				if (!rawVal) break;
-				// vCard 4.0: value is already a data URI (data:image/...) or URL — use as-is
-				// vCard 3.0: PHOTO;ENCODING=b;TYPE=JPEG:<raw-base64> — must build data URI
-				const isBase64Encoded = params.some((p) => p === "ENCODING=B" || p === "ENCODING=BASE64");
-				if (isBase64Encoded) {
-					const typeParam = params.find((p) => p.startsWith("TYPE="));
-					const ext = typeParam ? typeParam.slice(5).toLowerCase() : "jpeg";
-					const mimeMap: Record<string, string> = {
-						jpeg: "image/jpeg",
-						jpg: "image/jpeg",
-						png: "image/png",
-						gif: "image/gif",
-						webp: "image/webp",
-					};
-					const mimeType = mimeMap[ext] ?? `image/${ext}`;
-					// Strip any whitespace that may have survived unfolding
-					card.photo = `data:${mimeType};base64,${rawVal.replace(/\s/g, "")}`;
-				} else {
-					card.photo = rawVal;
-				}
-				break;
-			}
-			case "REV":
-				card.rev = value.trim();
-				break;
-			case "GEO": {
-				// GEO:lat;lon (vCard 3) or GEO;VALUE=uri:geo:lat,lon (vCard 4)
-				// Assign to first address so it round-trips through serialize/parse
-				const geoStr = value.startsWith("geo:") ? value.slice(4) : value;
-				const sep = geoStr.includes(",") ? "," : ";";
-				const [latStr, lonStr] = geoStr.split(sep);
-				const lat = parseFloat(latStr), lon = parseFloat(lonStr);
-				if (!isNaN(lat) && !isNaN(lon) && card.addresses.length > 0) {
-					card.addresses[0].geoLat = lat;
-					card.addresses[0].geoLon = lon;
-				}
-				break;
-			}
-		}
-	}
-
-	// Ensure UID
-	if (!card.uid) {
-		card.uid = `urn:uuid:${crypto.randomUUID()}`;
-	}
-
-	return card;
-}
-
-// ── Serializer ────────────────────────────────────────────────────────────────
-
-/** Encode a vCard value: escape special chars */
-function encodeValue(v: string): string {
-	return v.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
-}
-
-/** Fold long lines at 75 octets (RFC 6350 §3.2) */
-function fold(line: string): string {
-	if (line.length <= 75) return line;
-	const chunks: string[] = [];
-	chunks.push(line.slice(0, 75));
-	let pos = 75;
-	while (pos < line.length) {
-		chunks.push(" " + line.slice(pos, pos + 74));
-		pos += 74;
-	}
-	return chunks.join("\r\n");
+	rev: string;
+	raw: string;
 }
 
 export interface VCardInput {
@@ -288,89 +72,249 @@ export interface VCardInput {
 	middleName?: string;
 	prefix?: string;
 	suffix?: string;
-	fn?: string; // if provided, used as-is; otherwise built from name parts
+	fn?: string;
 	emails?: VCardEmail[];
 	phones?: VCardPhone[];
 	addresses?: VCardAddress[];
 	org?: string;
 	title?: string;
-	birthday?: string; // YYYY-MM-DD
+	birthday?: string;
 	note?: string;
-	photo?: string; // data URI or URL
+	photo?: string;
 }
 
-export function serializeVCard(input: VCardInput): string {
-	const uid = input.uid ?? `urn:uuid:${crypto.randomUUID()}`;
-	const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+// ── Parser ─────────────────────────────────────────────────────────────────
 
+export function parseVCard(raw: string): VCard {
+	const vcards = LibVCard.parse(raw);
+	const vc = vcards[0] ?? new LibVCard();
+
+	// UID
+	const uid = vc.uid?.value || `urn:uuid:${crypto.randomUUID()}`;
+
+	// FN
+	const fn = vc.displayName;
+
+	// N
+	const n = vc.n?.value;
+	const firstName = n?.givenNames[0] ?? "";
+	const lastName = n?.familyNames[0] ?? "";
+	const middleName = n?.additionalNames[0] ?? "";
+	const prefix = n?.honorificPrefixes[0] ?? "";
+	const suffix = n?.honorificSuffixes[0] ?? "";
+
+	// Emails
+	const emails: VCardEmail[] = vc.email.map((e) => ({
+		value: e.value,
+		type: e.type[0] ?? "",
+	}));
+
+	// Phones — strip tel: URI prefix for display
+	const phones: VCardPhone[] = vc.tel.map((p) => ({
+		value: p.value.startsWith("tel:") ? p.value.slice(4) : p.value,
+		type: p.type[0] ?? "",
+	}));
+
+	// Addresses
+	const addresses: VCardAddress[] = vc.adr.map((a) => ({
+		street: a.value.streetAddress,
+		city: a.value.locality,
+		region: a.value.region,
+		postcode: a.value.postalCode,
+		country: a.value.countryName,
+		type: a.type[0] ?? "",
+	}));
+
+	// GEO — assign first geo property to first address
+	const geo = vc.geo[0]?.coordinates;
+	if (geo && addresses.length > 0) {
+		addresses[0]!.geoLat = geo.latitude;
+		addresses[0]!.geoLon = geo.longitude;
+	}
+
+	// Org
+	const org = vc.org[0]?.value.name ?? "";
+
+	// Title
+	const title = vc.title[0]?.value ?? "";
+
+	// Birthday → YYYY-MM-DD
+	let birthday = "";
+	const bday = vc.bday;
+	if (bday?.dateValue) {
+		const d = bday.dateValue;
+		if (d.year != null && d.month != null && d.day != null) {
+			birthday = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+		}
+	} else if (bday?.textValue) {
+		birthday = bday.textValue;
+	}
+
+	// Note
+	const note = vc.note[0]?.value ?? "";
+
+	// Photo — handle vCard 3.0 ENCODING=B base64 photos
+	let photo = "";
+	if (vc.photo.length > 0) {
+		const p = vc.photo[0]!;
+		const encoding = p.params.get("ENCODING");
+		const encodingStr = (Array.isArray(encoding) ? encoding[0] : encoding)?.toUpperCase();
+		if (encodingStr === "B" || encodingStr === "BASE64") {
+			const typeParam = p.params.get("TYPE");
+			const ext = ((Array.isArray(typeParam) ? typeParam[0] : typeParam) ?? "jpeg").toLowerCase();
+			const mimeMap: Record<string, string> = {
+				jpeg: "image/jpeg",
+				jpg: "image/jpeg",
+				png: "image/png",
+				gif: "image/gif",
+				webp: "image/webp",
+			};
+			const mimeType = mimeMap[ext] ?? `image/${ext}`;
+			photo = `data:${mimeType};base64,${p.value.replace(/\s/g, "")}`;
+		} else {
+			photo = p.value;
+		}
+	}
+
+	// Rev
+	const rev = vc.rev ? vc.rev.toContentLine() : "";
+
+	return {
+		uid,
+		fn,
+		firstName,
+		lastName,
+		middleName,
+		prefix,
+		suffix,
+		emails,
+		phones,
+		addresses,
+		org,
+		title,
+		birthday,
+		note,
+		photo,
+		rev,
+		raw,
+	};
+}
+
+// ── Serializer ─────────────────────────────────────────────────────────────
+
+export function serializeVCard(input: VCardInput): string {
+	const vc = new LibVCard();
+
+	// UID
+	const uid = input.uid ?? `urn:uuid:${crypto.randomUUID()}`;
+	vc.uid = new UIDProperty(uid);
+
+	// FN — build from name parts if not provided directly
 	const fn =
 		input.fn ||
 		[input.prefix, input.firstName, input.middleName, input.lastName, input.suffix]
 			.filter(Boolean)
 			.join(" ") ||
 		"";
+	vc.fn.push(new FNProperty(fn));
 
-	const nParts = [
-		input.lastName ?? "",
-		input.firstName ?? "",
-		input.middleName ?? "",
-		input.prefix ?? "",
-		input.suffix ?? "",
-	].map(encodeValue);
+	// N
+	vc.n = new NProperty({
+		familyNames: input.lastName ? [input.lastName] : [],
+		givenNames: input.firstName ? [input.firstName] : [],
+		additionalNames: input.middleName ? [input.middleName] : [],
+		honorificPrefixes: input.prefix ? [input.prefix] : [],
+		honorificSuffixes: input.suffix ? [input.suffix] : [],
+	});
 
-	const lines: string[] = [
-		"BEGIN:VCARD",
-		"VERSION:4.0",
-		`UID:${uid}`,
-		fold(`FN:${encodeValue(fn)}`),
-		fold(`N:${nParts.join(";")}`),
-	];
-
-	for (const email of input.emails ?? []) {
-		if (!email.value) continue;
-		const typeStr = email.type ? `;TYPE=${email.type}` : "";
-		lines.push(fold(`EMAIL${typeStr}:${encodeValue(email.value)}`));
+	// Emails
+	for (const e of input.emails ?? []) {
+		if (!e.value) continue;
+		const p = new EmailProperty(e.value);
+		if (e.type) p.type = [e.type];
+		vc.email.push(p);
 	}
 
-	for (const phone of input.phones ?? []) {
-		if (!phone.value) continue;
-		const typeStr = phone.type ? `;TYPE=${phone.type}` : "";
-		lines.push(fold(`TEL${typeStr}:${encodeValue(phone.value)}`));
+	// Phones
+	for (const t of input.phones ?? []) {
+		if (!t.value) continue;
+		const p = new TelProperty(t.value);
+		if (t.type) p.type = [t.type];
+		vc.tel.push(p);
 	}
 
-	for (const adr of input.addresses ?? []) {
-		const typeStr = adr.type ? `;TYPE=${adr.type}` : "";
-		const adrValue = [
-			"", // POBox
-			"", // Extended
-			encodeValue(adr.street),
-			encodeValue(adr.city),
-			encodeValue(adr.region),
-			encodeValue(adr.postcode),
-			encodeValue(adr.country),
-		].join(";");
-		lines.push(fold(`ADR${typeStr}:${adrValue}`));
+	// Addresses
+	for (const a of input.addresses ?? []) {
+		const p = new AdrProperty({
+			postOfficeBox: "",
+			extendedAddress: "",
+			streetAddress: a.street,
+			locality: a.city,
+			region: a.region,
+			postalCode: a.postcode,
+			countryName: a.country,
+		});
+		if (a.type) p.type = [a.type];
+		vc.adr.push(p);
 	}
 
-	if (input.org) lines.push(fold(`ORG:${encodeValue(input.org)}`));
-	if (input.title) lines.push(fold(`TITLE:${encodeValue(input.title)}`));
-	if (input.birthday) lines.push(`BDAY:${input.birthday.replace(/-/g, "")}`);
-	if (input.note) lines.push(fold(`NOTE:${encodeValue(input.note)}`));
-	if (input.photo) lines.push(fold(`PHOTO:${input.photo}`));
+	// Org
+	if (input.org) {
+		vc.org.push(new OrgProperty({ name: input.org, units: [] }));
+	}
 
-	// Write GEO for the first address that has coordinates (RFC 6350 §6.5.2)
-	const geocodedAdr = (input.addresses ?? []).find((a) => a.geoLat != null && a.geoLon != null);
-	if (geocodedAdr) lines.push(`GEO:geo:${geocodedAdr.geoLat},${geocodedAdr.geoLon}`);
+	// Title
+	if (input.title) {
+		vc.title.push(new TitleProperty(input.title));
+	}
 
-	lines.push(`REV:${now}Z`);
-	lines.push("END:VCARD");
+	// Birthday — parse YYYY-MM-DD → DateAndOrTime
+	if (input.birthday) {
+		const parts = input.birthday.split("-").map(Number);
+		if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+			vc.bday = new BDayProperty({
+				year: parts[0],
+				month: parts[1],
+				day: parts[2],
+				hasTime: false,
+			});
+		}
+	}
 
-	return lines.join("\r\n") + "\r\n";
+	// Note
+	if (input.note) {
+		vc.note.push(new NoteProperty(input.note));
+	}
+
+	// Photo
+	if (input.photo) {
+		vc.photo.push(new PhotoProperty(input.photo));
+	}
+
+	// GEO — from first geocoded address
+	const geocodedAdr = (input.addresses ?? []).find(
+		(a) => a.geoLat != null && a.geoLon != null,
+	);
+	if (geocodedAdr) {
+		vc.geo.push(GeoProperty.fromCoordinates(geocodedAdr.geoLat!, geocodedAdr.geoLon!));
+	}
+
+	// REV
+	vc.rev = new RevProperty(new Date());
+
+	return vc.toString();
 }
+
+// ── Utilities ──────────────────────────────────────────────────────────────
 
 /** Build display name from VCard fields (for DB indexing) */
 export function displayName(card: VCard): string {
-	return card.fn || [card.firstName, card.lastName].filter(Boolean).join(" ") || card.emails[0]?.value || card.uid;
+	return (
+		card.fn ||
+		[card.firstName, card.lastName].filter(Boolean).join(" ") ||
+		card.emails[0]?.value ||
+		card.uid
+	);
 }
 
 /**
@@ -388,7 +332,7 @@ export function mergeVCards(primary: VCard, secondary: VCard): VCardInput {
 		if (key && !emailMap.has(key)) emailMap.set(key, e);
 	}
 
-	// phones: union by digits-only key (deduplicate different formatting of same number)
+	// phones: union by digits-only key
 	const phoneMap = new Map<string, VCardPhone>();
 	for (const p of [...primary.phones, ...secondary.phones]) {
 		const key = p.value.replace(/\D/g, "");

@@ -9,6 +9,7 @@
 	},
 	"dependencies": {
 		"@euorg/shared": "workspace:*",
+		"@pipobscure/vcard": "^1.0.1",
 		"@pipobscure/xml": "^1.0.3",
 		"electrobun": "1.13.1"
 	}
