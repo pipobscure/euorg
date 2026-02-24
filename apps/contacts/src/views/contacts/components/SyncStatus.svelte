@@ -6,9 +6,10 @@
 		lastResult: SyncResult | null;
 		lastSyncTime: number | null;
 		contactCount: number;
+		pendingCount: number;
 	}
 
-	let { progress, lastResult, lastSyncTime, contactCount }: Props = $props();
+	let { progress, lastResult, lastSyncTime, contactCount, pendingCount }: Props = $props();
 
 	function timeAgo(ts: number): string {
 		const secs = Math.floor((Date.now() - ts) / 1000);
@@ -35,6 +36,9 @@
 		<span>
 			{contactCount} contact{contactCount === 1 ? "" : "s"}
 		</span>
+		{#if pendingCount > 0}
+			<span class="text-warning-500">· {pendingCount} pending</span>
+		{/if}
 		{#if lastSyncTime}
 			<span>· Synced {timeAgo(lastSyncTime)}</span>
 		{/if}

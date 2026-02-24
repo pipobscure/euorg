@@ -94,7 +94,12 @@
 									{contact.displayName?.[0]?.toUpperCase() ?? "?"}
 								</div>
 								<div class="min-w-0 flex-1">
-									<div class="truncate text-sm font-medium">{contact.displayName}</div>
+									<div class="flex items-center gap-1.5 truncate">
+										<span class="truncate text-sm font-medium">{contact.displayName}</span>
+										{#if contact.pendingSync}
+											<span class="text-warning-500 shrink-0 text-[10px]" title="Pending sync">●</span>
+										{/if}
+									</div>
 									<div class="text-surface-400 truncate text-xs">
 										{contact.org ?? contact.emails[0]?.value ?? contact.phones[0]?.value ?? ""}
 									</div>

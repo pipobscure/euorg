@@ -1,5 +1,5 @@
 import { BrowserWindow, BrowserView, type ElectrobunRPCSchema, type RPCSchema } from "electrobun/bun";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -12,10 +12,21 @@ import {
 	allEnabledCollections,
 	type EuorgAccount,
 } from "@euorg/shared/euorg-accounts.ts";
-import { ContactsDB, type ContactRow } from "./db.ts";
+import { ContactsDB, VCARDS_DIR, type ContactRow } from "./db.ts";
 import { discoverCollections, testConnection } from "./carddav.ts";
 import { parseVCard, serializeVCard, mergeVCards, type VCardInput } from "./vcard.ts";
-import { syncAll, writeCreate, writeUpdate, writeDelete, writeMove, importVCards, type SyncProgress, type SyncResult, type ImportResult } from "./sync.ts";
+import {
+	syncAll,
+	writeCreate,
+	writeUpdate,
+	writeDelete,
+	writeMove,
+	importVCards,
+	isNetworkError,
+	type SyncProgress,
+	type SyncResult,
+	type ImportResult,
+} from "./sync.ts";
 import { getKeystoreType, setKeystoreType, type KeystoreType } from "@euorg/shared/keystore.ts";
 
 // ── View types (password omitted) ─────────────────────────────────────────────
@@ -72,6 +83,7 @@ interface ContactsRPCSchema extends ElectrobunRPCSchema {
 			mergeContacts: { params: { primaryUid: string; secondaryUid: string }; response: { vcf: string } };
 			getKeystoreType: { params: void; response: KeystoreType };
 			setKeystoreType: { params: { type: KeystoreType }; response: void };
+			getPendingCount: { params: void; response: number };
 		};
 		messages: {};
 	}>;
@@ -106,6 +118,122 @@ function collectionToView(
 	return { id: c.id, accountId, name: c.name, url: c.url, enabled: c.enabled };
 }
 
+// ── Offline fallback helpers ──────────────────────────────────────────────────
+
+/**
+ * Save a new contact locally without pushing to the server.
+ * Queues a 'create' operation for the next sync.
+ */
+function saveCreateLocally(db: ContactsDB, vcfText: string, collectionId: string): string {
+	const cfg = readAccounts();
+	const pair = allEnabledCollections(cfg).find(({ collection }) => collection.id === collectionId);
+	if (!pair) throw new Error(`Collection ${collectionId} not found or disabled`);
+	const { account, collection } = pair;
+
+	const card = parseVCard(vcfText);
+	const vcfPath = join(VCARDS_DIR, `${encodeURIComponent(card.uid)}.vcf`);
+	writeFileSync(vcfPath, vcfText, "utf8");
+
+	// href is empty — this contact doesn't exist on the server yet
+	db.upsertContact(card, collection.id, account.id, "", "", "create");
+	db.addToQueue({ operation: "create", uid: card.uid, collectionId: collection.id });
+
+	console.log(`[offline] Queued create for ${card.uid}`);
+	return card.uid;
+}
+
+/**
+ * Save an updated contact locally without pushing to the server.
+ * Queues an 'update' operation, or deduplicates if already queued.
+ */
+function saveUpdateLocally(db: ContactsDB, uid: string, vcfText: string): void {
+	const row = db.getContact(uid);
+	if (!row) throw new Error(`Contact ${uid} not found`);
+
+	// Parse and write the updated vCard locally.
+	const card = parseVCard(vcfText);
+	writeFileSync(row.vcfPath, vcfText, "utf8");
+
+	if (row.pendingSync === "create") {
+		// Still pending create — just update the local file; the create queue entry
+		// will push the latest file contents when it finally syncs.
+		db.upsertContact(card, row.collectionId, row.accountId, "", "", "create");
+		return;
+	}
+
+	// Mark as pending update in DB (preserve original href/etag for the server PUT).
+	db.upsertContact(card, row.collectionId, row.accountId, row.href, row.etag ?? "", "update");
+
+	// Add queue entry only if not already queued for this uid.
+	const existing = db.getQueueEntry(uid);
+	if (!existing) {
+		db.addToQueue({ operation: "update", uid });
+	}
+	console.log(`[offline] Queued update for ${uid}`);
+}
+
+/**
+ * Queue a delete locally.
+ * If the contact is a pending create (never pushed), cancel the create and
+ * remove it immediately. Otherwise mark it as pending delete so the server
+ * DELETE is deferred to the next sync.
+ */
+function saveDeleteLocally(db: ContactsDB, uid: string): void {
+	const row = db.getContact(uid);
+	if (!row) return;
+
+	const existing = db.getQueueEntry(uid);
+	if (existing?.operation === "create") {
+		// Contact was never pushed — just remove it locally and cancel the queue entry.
+		db.deleteContact(uid);
+		if (row.vcfPath && existsSync(row.vcfPath)) unlinkSync(row.vcfPath);
+		db.removeFromQueue(existing.id);
+		console.log(`[offline] Cancelled pending create for ${uid}`);
+		return;
+	}
+
+	// Real contact on server — mark pending delete (filtered from UI, DELETE queued).
+	db.setPendingSync(uid, "delete");
+	// Replace any existing update/move queue entry with a delete.
+	if (existing) db.removeFromQueue(existing.id);
+	db.addToQueue({ operation: "delete", uid });
+	console.log(`[offline] Queued delete for ${uid}`);
+}
+
+/**
+ * Queue a move locally (update collection in DB, defer server operations).
+ */
+function saveMoveLocally(db: ContactsDB, uid: string, targetCollectionId: string): void {
+	const row = db.getContact(uid);
+	if (!row) throw new Error(`Contact ${uid} not found`);
+	if (row.collectionId === targetCollectionId) return;
+
+	const cfg = readAccounts();
+	const targetPair = allEnabledCollections(cfg).find(
+		({ collection }) => collection.id === targetCollectionId,
+	);
+	if (!targetPair) throw new Error(`Target collection ${targetCollectionId} not found or disabled`);
+	const { account: dstAccount } = targetPair;
+
+	const card = parseVCard(readFileSync(row.vcfPath, "utf8"));
+	// Update DB to reflect the new collection (local state) while preserving
+	// the original href/etag so we can delete from the source on next sync.
+	db.upsertContact(card, targetCollectionId, dstAccount.id, row.href, row.etag ?? "", "move");
+
+	// Replace any existing queue entry for this uid.
+	const existing = db.getQueueEntry(uid);
+	if (existing) db.removeFromQueue(existing.id);
+	db.addToQueue({
+		operation: "move",
+		uid,
+		targetCollectionId,
+		sourceCollectionId: row.collectionId,
+		sourceHref: row.href,
+		sourceEtag: row.etag ?? "",
+	});
+	console.log(`[offline] Queued move for ${uid} → ${targetCollectionId}`);
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 
 const db = new ContactsDB();
@@ -131,22 +259,54 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 			},
 
 			async createContact({ vcf, collectionId }) {
-				const { uid } = await writeCreate(db, vcf, collectionId);
-				const row = db.getContact(uid);
-				rpc.send("contactChanged", { uid, action: "created" });
-				return row;
+				try {
+					const { uid } = await writeCreate(db, vcf, collectionId);
+					const row = db.getContact(uid);
+					rpc.send("contactChanged", { uid, action: "created" });
+					return row;
+				} catch (e) {
+					if (!isNetworkError(e)) throw e;
+					console.log("[offline] createContact: network error, saving locally.");
+					const uid = saveCreateLocally(db, vcf, collectionId);
+					const row = db.getContact(uid);
+					rpc.send("contactChanged", { uid, action: "created" });
+					return row;
+				}
 			},
 
 			async updateContact({ uid, vcf }) {
-				await writeUpdate(db, uid, vcf);
-				const row = db.getContact(uid);
-				rpc.send("contactChanged", { uid, action: "updated" });
-				return row;
+				try {
+					await writeUpdate(db, uid, vcf);
+					const row = db.getContact(uid);
+					rpc.send("contactChanged", { uid, action: "updated" });
+					return row;
+				} catch (e) {
+					if (!isNetworkError(e)) throw e;
+					console.log(`[offline] updateContact ${uid}: network error, saving locally.`);
+					saveUpdateLocally(db, uid, vcf);
+					const row = db.getContact(uid);
+					rpc.send("contactChanged", { uid, action: "updated" });
+					return row;
+				}
 			},
 
 			async deleteContact({ uid }) {
-				await writeDelete(db, uid);
-				rpc.send("contactChanged", { uid, action: "deleted" });
+				try {
+					await writeDelete(db, uid);
+					rpc.send("contactChanged", { uid, action: "deleted" });
+				} catch (e) {
+					if (!isNetworkError(e)) throw e;
+					console.log(`[offline] deleteContact ${uid}: network error, queuing delete.`);
+					const wasPendingCreate = db.getQueueEntry(uid)?.operation === "create";
+					saveDeleteLocally(db, uid);
+					// For pending creates that were cancelled, the contact is truly gone locally.
+					// For real contacts, the row is still there (pending_sync='delete') but hidden.
+					rpc.send("contactChanged", {
+						uid,
+						action: "deleted",
+					});
+					void wasPendingCreate; // suppress unused warning
+				}
 			},
 
 			// ── Accounts ───────────────────────────────────────────────────────
@@ -294,6 +454,10 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 				return db.countContacts(enabledCollectionIds(readAccounts()));
 			},
 
+			async getPendingCount() {
+				return db.getPendingCount();
+			},
+
 			async getEnabledCollections() {
 				return allEnabledCollections(readAccounts()).map(({ account, collection }) =>
 					collectionToView(account.id, collection),
@@ -308,10 +472,19 @@ const rpc = BrowserView.defineRPC<ContactsRPCSchema>({
 			},
 
 			async moveContact({ uid, targetCollectionId }) {
-				await writeMove(db, uid, targetCollectionId);
-				const row = db.getContact(uid);
-				rpc.send("contactChanged", { uid, action: "updated" });
-				return row;
+				try {
+					await writeMove(db, uid, targetCollectionId);
+					const row = db.getContact(uid);
+					rpc.send("contactChanged", { uid, action: "updated" });
+					return row;
+				} catch (e) {
+					if (!isNetworkError(e)) throw e;
+					console.log(`[offline] moveContact ${uid}: network error, queuing move.`);
+					saveMoveLocally(db, uid, targetCollectionId);
+					const row = db.getContact(uid);
+					rpc.send("contactChanged", { uid, action: "updated" });
+					return row;
+				}
 			},
 
 			async importVCards({ vcfText, collectionId }) {

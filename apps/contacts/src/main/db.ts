@@ -38,6 +38,25 @@ export interface ContactRow {
 	phones: Array<{ value: string; type: string }>;
 	org: string | null;
 	lastSynced: number | null;
+	/** null = synced; 'create' | 'update' | 'delete' | 'move' = pending server push */
+	pendingSync: string | null;
+}
+
+export interface OfflineQueueItem {
+	id: number;
+	operation: "create" | "update" | "delete" | "move";
+	uid: string;
+	/** For create: the target collection id */
+	collectionId: string | null;
+	/** For move: target collection id */
+	targetCollectionId: string | null;
+	/** For move: old source collection id */
+	sourceCollectionId: string | null;
+	/** For move: old server href before move */
+	sourceHref: string | null;
+	/** For move: old server etag before move */
+	sourceEtag: string | null;
+	queuedAt: number;
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -85,6 +104,15 @@ export class ContactsDB {
 			)
 		`);
 
+		// Add pending_sync column if it does not yet exist (migration for existing DBs).
+		const hasPendingSync = this.db
+			.query("SELECT name FROM pragma_table_info('contacts') WHERE name='pending_sync'")
+			.get();
+		if (!hasPendingSync) {
+			this.db.run("ALTER TABLE contacts ADD COLUMN pending_sync TEXT DEFAULT NULL");
+			console.log("[db] Migrated: added pending_sync column to contacts.");
+		}
+
 		this.db.run(`
 			CREATE VIRTUAL TABLE IF NOT EXISTS contacts_fts USING fts5(
 				uid UNINDEXED,
@@ -117,6 +145,21 @@ export class ContactsDB {
 				VALUES (new.rowid, new.uid, new.display_name, new.emails, new.phones, new.org);
 			END
 		`);
+
+		// Offline queue: operations waiting to be pushed to the server.
+		this.db.run(`
+			CREATE TABLE IF NOT EXISTS offline_queue (
+				id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+				operation            TEXT NOT NULL CHECK(operation IN ('create', 'update', 'delete', 'move')),
+				uid                  TEXT NOT NULL,
+				collection_id        TEXT,
+				target_collection_id TEXT,
+				source_collection_id TEXT,
+				source_href          TEXT,
+				source_etag          TEXT,
+				queued_at            INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
+			)
+		`);
 	}
 
 	close() {
@@ -127,7 +170,8 @@ export class ContactsDB {
 
 	/**
 	 * Returns all contacts whose collection_id is in the provided set,
-	 * sorted by display_name. Pass enabledCollectionIds from accounts.json.
+	 * sorted by display_name. Contacts pending server-side delete are excluded.
+	 * Pass enabledCollectionIds from accounts.json.
 	 */
 	getContacts(enabledCollectionIds: string[]): ContactRow[] {
 		if (enabledCollectionIds.length === 0) return [];
@@ -137,6 +181,7 @@ export class ContactsDB {
 				.query(
 					`SELECT * FROM contacts
 					 WHERE collection_id IN (${placeholders})
+					   AND (pending_sync IS NULL OR pending_sync != 'delete')
 					 ORDER BY display_name COLLATE NOCASE`,
 				)
 				.all(...enabledCollectionIds) as any[]
@@ -153,6 +198,7 @@ export class ContactsDB {
 				.query(
 					`SELECT * FROM contacts
 					 WHERE collection_id IN (${placeholders})
+					   AND (pending_sync IS NULL OR pending_sync != 'delete')
 					   AND uid IN (SELECT uid FROM contacts_fts WHERE contacts_fts MATCH ?)
 					 ORDER BY display_name COLLATE NOCASE`,
 				)
@@ -165,14 +211,32 @@ export class ContactsDB {
 		return row ? rowToContact(row) : null;
 	}
 
-	/** href → etag map for a given collection (used for sync diffing) */
+	/**
+	 * href → etag map for sync diffing.
+	 * Excludes pending-create contacts (they have no server href yet).
+	 */
 	getEtags(collectionId: string): Map<string, string> {
 		const rows = this.db
-			.query("SELECT href, etag FROM contacts WHERE collection_id=?")
+			.query(
+				"SELECT href, etag FROM contacts WHERE collection_id=? AND (pending_sync IS NULL OR pending_sync != 'create')",
+			)
 			.all(collectionId) as any[];
 		const map = new Map<string, string>();
-		for (const r of rows) map.set(r.href, r.etag ?? "");
+		for (const r of rows) if (r.href) map.set(r.href, r.etag ?? "");
 		return map;
+	}
+
+	/**
+	 * Returns the set of hrefs for contacts with pending changes (update/delete/move).
+	 * Used by syncCollection to skip overwriting local edits with server data.
+	 */
+	getPendingSyncHrefs(collectionId: string): Set<string> {
+		const rows = this.db
+			.query(
+				"SELECT href FROM contacts WHERE collection_id=? AND pending_sync IS NOT NULL AND pending_sync != 'create'",
+			)
+			.all(collectionId) as any[];
+		return new Set(rows.map((r: any) => r.href).filter(Boolean));
 	}
 
 	upsertContact(
@@ -181,24 +245,31 @@ export class ContactsDB {
 		accountId: string,
 		href: string,
 		etag: string,
+		pendingSync?: string | null,
 	): string {
 		const vcfPath = join(VCARDS_DIR, `${encodeURIComponent(card.uid)}.vcf`);
 		const dn = displayName(card);
 		const emails = JSON.stringify(card.emails);
 		const phones = JSON.stringify(card.phones);
+		const ps = pendingSync !== undefined ? pendingSync : null;
 
 		this.db.run(
 			`INSERT INTO contacts
-			   (uid, account_id, collection_id, etag, href, vcf_path, display_name, emails, phones, org, last_synced)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   (uid, account_id, collection_id, etag, href, vcf_path, display_name, emails, phones, org, last_synced, pending_sync)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(uid) DO UPDATE SET
 			   collection_id=excluded.collection_id, account_id=excluded.account_id,
 			   etag=excluded.etag, href=excluded.href, vcf_path=excluded.vcf_path,
 			   display_name=excluded.display_name, emails=excluded.emails,
-			   phones=excluded.phones, org=excluded.org, last_synced=excluded.last_synced`,
-			[card.uid, accountId, collectionId, etag, href, vcfPath, dn, emails, phones, card.org || null, Date.now()],
+			   phones=excluded.phones, org=excluded.org, last_synced=excluded.last_synced,
+			   pending_sync=excluded.pending_sync`,
+			[card.uid, accountId, collectionId, etag, href, vcfPath, dn, emails, phones, card.org || null, Date.now(), ps],
 		);
 		return vcfPath;
+	}
+
+	setPendingSync(uid: string, state: string | null) {
+		this.db.run("UPDATE contacts SET pending_sync=? WHERE uid=?", [state, uid]);
 	}
 
 	deleteContact(uid: string) {
@@ -215,18 +286,80 @@ export class ContactsDB {
 
 	countContacts(enabledCollectionIds?: string[]): number {
 		if (!enabledCollectionIds || enabledCollectionIds.length === 0) {
-			const row = this.db.query("SELECT COUNT(*) as n FROM contacts").get() as any;
+			const row = this.db
+				.query("SELECT COUNT(*) as n FROM contacts WHERE pending_sync IS NULL OR pending_sync != 'delete'")
+				.get() as any;
 			return row?.n ?? 0;
 		}
 		const placeholders = enabledCollectionIds.map(() => "?").join(",");
 		const row = this.db
-			.query(`SELECT COUNT(*) as n FROM contacts WHERE collection_id IN (${placeholders})`)
+			.query(
+				`SELECT COUNT(*) as n FROM contacts
+				 WHERE collection_id IN (${placeholders})
+				   AND (pending_sync IS NULL OR pending_sync != 'delete')`,
+			)
 			.get(...enabledCollectionIds) as any;
 		return row?.n ?? 0;
 	}
+
+	/** How many contacts have unsent local changes (all operations, including pending deletes). */
+	getPendingCount(): number {
+		const row = this.db.query("SELECT COUNT(*) as n FROM contacts WHERE pending_sync IS NOT NULL").get() as any;
+		return row?.n ?? 0;
+	}
+
+	// ── Offline queue ─────────────────────────────────────────────────────────
+
+	/** Returns the first queue entry for a uid (oldest queued operation). */
+	getQueueEntry(uid: string): OfflineQueueItem | null {
+		const row = this.db
+			.query("SELECT * FROM offline_queue WHERE uid=? ORDER BY queued_at ASC LIMIT 1")
+			.get(uid) as any;
+		return row ? rowToQueueItem(row) : null;
+	}
+
+	/** All pending queue items in the order they were queued. */
+	getOfflineQueue(): OfflineQueueItem[] {
+		return (this.db.query("SELECT * FROM offline_queue ORDER BY queued_at ASC").all() as any[]).map(rowToQueueItem);
+	}
+
+	addToQueue(item: {
+		operation: string;
+		uid: string;
+		collectionId?: string;
+		targetCollectionId?: string;
+		sourceCollectionId?: string;
+		sourceHref?: string;
+		sourceEtag?: string;
+	}): number {
+		const result = this.db.run(
+			`INSERT INTO offline_queue
+			   (operation, uid, collection_id, target_collection_id, source_collection_id, source_href, source_etag)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				item.operation,
+				item.uid,
+				item.collectionId ?? null,
+				item.targetCollectionId ?? null,
+				item.sourceCollectionId ?? null,
+				item.sourceHref ?? null,
+				item.sourceEtag ?? null,
+			],
+		);
+		return result.lastInsertRowid as number;
+	}
+
+	removeFromQueue(id: number) {
+		this.db.run("DELETE FROM offline_queue WHERE id=?", [id]);
+	}
+
+	/** Remove all queue entries for a given uid. */
+	clearQueueForUid(uid: string) {
+		this.db.run("DELETE FROM offline_queue WHERE uid=?", [uid]);
+	}
 }
 
-// ── Row mapper ────────────────────────────────────────────────────────────────
+// ── Row mappers ───────────────────────────────────────────────────────────────
 
 function rowToContact(r: any): ContactRow {
 	return {
@@ -241,5 +374,20 @@ function rowToContact(r: any): ContactRow {
 		phones: JSON.parse(r.phones ?? "[]"),
 		org: r.org ?? null,
 		lastSynced: r.last_synced ?? null,
+		pendingSync: r.pending_sync ?? null,
+	};
+}
+
+function rowToQueueItem(r: any): OfflineQueueItem {
+	return {
+		id: r.id,
+		operation: r.operation,
+		uid: r.uid,
+		collectionId: r.collection_id ?? null,
+		targetCollectionId: r.target_collection_id ?? null,
+		sourceCollectionId: r.source_collection_id ?? null,
+		sourceHref: r.source_href ?? null,
+		sourceEtag: r.source_etag ?? null,
+		queuedAt: r.queued_at,
 	};
 }

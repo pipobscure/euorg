@@ -13,6 +13,8 @@ export interface ContactRow {
 	phones: Array<{ value: string; type: string }>;
 	org: string | null;
 	lastSynced: number | null;
+	/** null = synced with server; 'create' | 'update' | 'delete' | 'move' = pending push */
+	pendingSync: string | null;
 }
 
 export interface VCard {

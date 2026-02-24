@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Contacts
+GenericName=Contacts
+Comment=EUOrg Contacts — CardDAV address book
+Exec=/home/pip/.bin/contacts %F
+Icon=x-office-address-book
+Terminal=false
+Categories=Office;ContactManagement;
+MimeType=text/vcard;text/x-vcard;
+StartupNotify=true
+StartupWMClass=Contacts
+Keywords=contacts;carddav;vcard;address;

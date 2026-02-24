@@ -52,6 +52,9 @@
 	// Derived: ContactRow for the currently selected contact
 	let selectedRow = $derived(contacts.find((c) => c.uid === selectedUid) ?? null);
 
+	// Number of contacts with unsent local changes (visible in the list)
+	let pendingCount = $derived(contacts.filter((c) => c.pendingSync !== null).length);
+
 	// Delete confirmation
 	let deleteConfirmUid = $state<string | null>(null);
 	let deleteConfirmRow = $derived(contacts.find((c) => c.uid === deleteConfirmUid) ?? null);
@@ -182,6 +185,7 @@
 				case "n": e.preventDefault(); openNewContact(); break;
 				case "e": if (selectedUid) { e.preventDefault(); openEditorForUid(selectedUid); } break;
 				case ",": e.preventDefault(); showAccountSettings = true; break;
+				case "r": e.preventDefault(); triggerSync(); break;
 			}
 			return;
 		}
@@ -422,6 +426,7 @@
 		lastResult={lastSyncResult}
 		lastSyncTime={lastSyncTime}
 		{contactCount}
+		{pendingCount}
 	/>
 
 	<!-- Notification banner -->
