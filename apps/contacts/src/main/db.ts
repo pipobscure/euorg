@@ -11,10 +11,10 @@
 
 import { Database } from "bun:sqlite";
 import { join } from "path";
-import { mkdirSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
 import { EUORG_DIR } from "@euorg/shared/euorg-accounts.ts";
 import type { VCard } from "./vcard.ts";
-import { displayName } from "./vcard.ts";
+import { displayName, parseVCard } from "./vcard.ts";
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -120,6 +120,25 @@ export class ContactsDB {
 		if (!hasAddresses) {
 			this.db.run("ALTER TABLE contacts ADD COLUMN addresses TEXT NOT NULL DEFAULT '[]'");
 			console.log("[db] Migrated: added addresses column to contacts.");
+			// Backfill addresses for all existing contacts by re-parsing their vCard files
+			const rows = this.db.query<{ uid: string; vcf_path: string }, []>(
+				"SELECT uid, vcf_path FROM contacts"
+			).all();
+			let backfilled = 0;
+			for (const row of rows) {
+				try {
+					const raw = readFileSync(row.vcf_path, "utf8");
+					const card = parseVCard(raw);
+					if (card.addresses.length > 0) {
+						this.db.run("UPDATE contacts SET addresses=? WHERE uid=?", [
+							JSON.stringify(card.addresses),
+							row.uid,
+						]);
+						backfilled++;
+					}
+				} catch {}
+			}
+			if (backfilled > 0) console.log(`[db] Backfilled addresses for ${backfilled} contacts.`);
 		}
 
 		this.db.run(`
