@@ -23,6 +23,19 @@
 
 	let defaultAccountId = $derived(accounts.find((a) => a.enabled)?.id ?? null);
 
+	// ── Tags ───────────────────────────────────────────────────────────────────
+	let selectedTag = $state<string | null>(null);
+
+	// All unique tags across all notes, sorted
+	let allTags = $derived(
+		Array.from(new Set(notes.flatMap((n) => n.tags))).sort()
+	);
+
+	// Notes filtered by active tag (search is already applied server-side)
+	let filteredNotes = $derived(
+		selectedTag ? notes.filter((n) => n.tags.includes(selectedTag!)) : notes
+	);
+
 	// ── Load ───────────────────────────────────────────────────────────────────
 	async function loadNotes() {
 		if (searchQuery.trim()) {
@@ -54,7 +67,10 @@
 			if (action === "deleted" && selectedUid === uid) {
 				selectedUid = null;
 			}
-			await loadNotes();
+			// "updated" is already handled locally by handleSave/handleTitleChange
+			if (action !== "updated") {
+				await loadNotes();
+			}
 		});
 	});
 
@@ -76,14 +92,30 @@
 	}
 
 	async function handleSave(uid: string, bodyHtml: string) {
-		await rpc.request.updateNote({ uid, bodyHtml });
-		// Update local state directly without re-fetching all
-		notes = notes.map((n) => (n.uid === uid ? { ...n, bodyHtml, modifiedAt: new Date().toISOString() } : n));
+		const updated = await rpc.request.updateNote({ uid, bodyHtml });
+		if (updated) {
+			notes = notes.map((n) => (n.uid === uid ? updated : n));
+		}
 	}
 
 	async function handleTitleChange(uid: string, subject: string) {
-		await rpc.request.updateNote({ uid, subject });
-		notes = notes.map((n) => (n.uid === uid ? { ...n, subject, modifiedAt: new Date().toISOString() } : n));
+		const updated = await rpc.request.updateNote({ uid, subject });
+		if (updated) {
+			notes = notes.map((n) => (n.uid === uid ? updated : n));
+		}
+	}
+
+	async function handleDelete(uid: string) {
+		await rpc.request.deleteNote({ uid });
+		notes = notes.filter((n) => n.uid !== uid);
+		if (selectedUid === uid) selectedUid = null;
+	}
+
+	async function handleTagsChange(uid: string, tags: string[]) {
+		const updated = await rpc.request.setNoteTags({ uid, tags });
+		if (updated) {
+			notes = notes.map((n) => (n.uid === uid ? updated : n));
+		}
 	}
 
 	async function handleSearch(q: string) {
@@ -137,9 +169,24 @@
 		{:else}
 			<!-- Note list panel -->
 			<div class="w-72 shrink-0 border-r border-surface-200-800 flex flex-col">
+				<!-- Tag filter strip (only when tags exist) -->
+				{#if allTags.length > 0}
+					<div class="px-3 py-1.5 border-b border-surface-100-900 flex flex-wrap gap-1">
+						<button
+							class="px-2 py-0.5 text-xs rounded-full transition-colors {!selectedTag ? 'bg-primary-500 text-white' : 'bg-surface-200-800 hover:bg-surface-300-700'}"
+							onclick={() => selectedTag = null}
+						>All</button>
+						{#each allTags as tag}
+							<button
+								class="px-2 py-0.5 text-xs rounded-full transition-colors {selectedTag === tag ? 'bg-primary-500 text-white' : 'bg-surface-200-800 hover:bg-surface-300-700'}"
+								onclick={() => selectedTag = selectedTag === tag ? null : tag}
+							>{tag}</button>
+						{/each}
+					</div>
+				{/if}
 				<div class="flex-1 overflow-hidden">
 					<NoteList
-						{notes}
+						notes={filteredNotes}
 						{selectedUid}
 						{searchQuery}
 						onSelect={(uid) => selectedUid = uid}
@@ -164,6 +211,8 @@
 				note={selectedNote}
 				onSave={handleSave}
 				onTitleChange={handleTitleChange}
+				onDelete={handleDelete}
+				onTagsChange={handleTagsChange}
 			/>
 		</div>
 	</div>

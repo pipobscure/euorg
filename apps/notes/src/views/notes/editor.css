@@ -1,0 +1,84 @@
+/* TipTap / ProseMirror editor styles for the Notes app */
+
+.note-editor .ProseMirror {
+	outline: none;
+	min-height: 100%;
+	font-size: 0.9375rem;
+	line-height: 1.7;
+}
+
+/* Placeholder */
+.note-editor .ProseMirror p.is-editor-empty:first-child::before {
+	content: attr(data-placeholder);
+	float: left;
+	color: var(--color-surface-400);
+	pointer-events: none;
+	height: 0;
+}
+
+/* Headings */
+.note-editor .ProseMirror h1 { font-size: 1.5em; font-weight: 700; margin: 1em 0 0.3em; }
+.note-editor .ProseMirror h2 { font-size: 1.25em; font-weight: 600; margin: 0.9em 0 0.3em; }
+.note-editor .ProseMirror h3 { font-size: 1.1em; font-weight: 600; margin: 0.8em 0 0.25em; }
+
+/* Paragraph spacing */
+.note-editor .ProseMirror p { margin: 0.4em 0; }
+.note-editor .ProseMirror p:first-child { margin-top: 0; }
+
+/* Lists — must override Tailwind preflight which resets list-style to none */
+.note-editor .ProseMirror ul { list-style: disc; padding-left: 1.5em; margin: 0.4em 0; }
+.note-editor .ProseMirror ol { list-style: decimal; padding-left: 1.5em; margin: 0.4em 0; }
+.note-editor .ProseMirror li > p { margin: 0.1em 0; }
+
+/* Task list */
+.note-editor .ProseMirror ul[data-type="taskList"] { list-style: none; padding-left: 0.25em; }
+.note-editor .ProseMirror ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 0.5em; }
+.note-editor .ProseMirror ul[data-type="taskList"] li > label { margin-top: 0.25em; flex-shrink: 0; }
+.note-editor .ProseMirror ul[data-type="taskList"] li > div { flex: 1; }
+.note-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div { text-decoration: line-through; opacity: 0.6; }
+
+/* Blockquote */
+.note-editor .ProseMirror blockquote {
+	border-left: 3px solid var(--color-surface-300-700);
+	padding-left: 1em;
+	margin: 0.5em 0;
+	color: var(--color-surface-600-400);
+	font-style: italic;
+}
+
+/* Code */
+.note-editor .ProseMirror code {
+	background: rgba(128, 128, 128, 0.15);
+	border: 1px solid rgba(128, 128, 128, 0.2);
+	border-radius: 3px;
+	padding: 0.1em 0.4em;
+	font-family: ui-monospace, monospace;
+	font-size: 0.85em;
+}
+.note-editor .ProseMirror pre {
+	background: rgba(128, 128, 128, 0.12);
+	border: 1px solid rgba(128, 128, 128, 0.2);
+	border-radius: 6px;
+	padding: 0.75em 1em;
+	margin: 0.5em 0;
+	overflow-x: auto;
+}
+.note-editor .ProseMirror pre code {
+	background: none;
+	border: none;
+	padding: 0;
+	font-size: 0.875em;
+}
+
+/* Links */
+.note-editor .ProseMirror a {
+	color: var(--color-primary-500);
+	text-decoration: underline;
+}
+
+/* Horizontal rule */
+.note-editor .ProseMirror hr {
+	border: none;
+	border-top: 1px solid var(--color-surface-200-800);
+	margin: 1em 0;
+}

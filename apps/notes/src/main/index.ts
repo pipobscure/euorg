@@ -54,6 +54,8 @@ interface NotesRPCSchema extends ElectrobunRPCSchema {
 			getNoteCount: { params: void; response: number };
 			getKeystoreType: { params: void; response: KeystoreType };
 			setKeystoreType: { params: { type: KeystoreType }; response: void };
+			setNoteTags: { params: { uid: string; tags: string[] }; response: NoteRow | null };
+			logError: { params: { message: string; source?: string; lineno?: number }; response: void };
 		};
 		messages: {};
 	}>;
@@ -89,6 +91,11 @@ function enabledImapAccountIds(accounts: EuorgAccount[]): string[] {
 // ── Database ──────────────────────────────────────────────────────────────────
 
 const db = new NotesDB();
+
+// ── Per-note IMAP push lock ────────────────────────────────────────────────────
+// Prevents concurrent immediate-push operations for the same note, which would
+// cause the same UID to be deleted by both, then two orphaned messages appended.
+const pendingPushes = new Set<string>();
 
 // ── RPC ───────────────────────────────────────────────────────────────────────
 
@@ -175,8 +182,12 @@ const rpc = BrowserView.defineRPC<NotesRPCSchema>({
 				};
 				db.upsertNote(updated);
 
-				// Try to push immediately if not already queued as create
-				if (updated.pendingSync === "update") {
+				// Try to push immediately if not already queued as create and no push in flight.
+				// The lock prevents concurrent IMAP pushes for the same note, which would cause
+				// both calls to see the same old imapUid, both DELETE it (second is a no-op),
+				// then both APPEND — leaving an orphaned duplicate on the server.
+				if (updated.pendingSync === "update" && !pendingPushes.has(uid)) {
+					pendingPushes.add(uid);
 					try {
 						const accounts = readAccounts().accounts;
 						const account = accounts.find((a) => a.id === updated.accountId);
@@ -190,24 +201,31 @@ const rpc = BrowserView.defineRPC<NotesRPCSchema>({
 								logger: false,
 							});
 							await client.connect();
-							const lock = await client.getMailboxLock(updated.folder);
-							try {
-								if (updated.imapUid !== null) {
-									await client.messageDelete(`${updated.imapUid}`, { uid: true });
+							// Re-read current note state — any edits that arrived while connecting
+							// have already been written to DB, so we push the latest content.
+							const current = db.getNote(uid);
+							if (current?.pendingSync === "update") {
+								const lock = await client.getMailboxLock(current.folder);
+								try {
+									if (current.imapUid !== null) {
+										await client.messageDelete(`${current.imapUid}`, { uid: true });
+									}
+									const raw = buildNoteMessage(current);
+									const appendResult = await client.append(current.folder, raw, ["\\Seen"], new Date(current.modifiedAt));
+									const newUid = (appendResult as any)?.uid ?? null;
+									db.setImapUid(uid, newUid ? Number(newUid) : null);
+									db.setPendingSync(uid, null);
+								} finally {
+									lock.release();
 								}
-								const raw = buildNoteMessage(updated);
-								const appendResult = await client.append(updated.folder, raw, ["\\Seen"], new Date(updated.modifiedAt));
-								const newUid = (appendResult as any)?.uid ?? null;
-								db.setImapUid(uid, newUid ? Number(newUid) : null);
-								db.setPendingSync(uid, null);
-							} finally {
-								lock.release();
-								await client.logout();
 							}
+							await client.logout();
 						}
 					} catch (e) {
 						if (!isNetworkError(e)) throw e;
 						console.log(`[offline] updateNote ${uid}: network error, will sync later`);
+					} finally {
+						pendingPushes.delete(uid);
 					}
 				}
 
@@ -334,6 +352,14 @@ const rpc = BrowserView.defineRPC<NotesRPCSchema>({
 
 			async setKeystoreType({ type }) {
 				setKeystoreType(type);
+			},
+
+			async setNoteTags({ uid, tags }) {
+				return db.setNoteTags(uid, tags);
+			},
+
+			async logError({ message, source, lineno }) {
+				console.error(`[webview]`, message, source ? `(${source}:${lineno})` : "");
 			},
 		},
 

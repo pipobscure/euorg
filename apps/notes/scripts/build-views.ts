@@ -32,4 +32,5 @@ const cssResult = await postcss([
 	to: ".build-views/index.css",
 });
 
-writeFileSync(".build-views/index.css", cssResult.css, "utf8");
+const editorCss = readFileSync("src/views/notes/editor.css", "utf8");
+writeFileSync(".build-views/index.css", cssResult.css + "\n" + editorCss, "utf8");

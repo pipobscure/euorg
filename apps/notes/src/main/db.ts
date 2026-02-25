@@ -32,6 +32,7 @@ export interface NoteRow {
 	/** null = synced; 'create' | 'update' | 'delete' = pending server push */
 	pendingSync: string | null;
 	lastSynced: number | null;
+	tags: string[];
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -69,6 +70,9 @@ export class NotesDB {
 				PRIMARY KEY (account_id, folder)
 			)
 		`);
+
+		// Add tags column to existing DBs (safe no-op if already present)
+		try { this.db.run("ALTER TABLE notes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"); } catch {}
 
 		this.db.run(`
 			CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
@@ -111,7 +115,7 @@ export class NotesDB {
 	getNotes(accountIds?: string[]): NoteRow[] {
 		const base = `
 			SELECT uid, account_id, folder, imap_uid, subject, body_html,
-			       created_at, modified_at, pending_sync, last_synced
+			       created_at, modified_at, pending_sync, last_synced, tags
 			FROM notes
 			WHERE (pending_sync IS NULL OR pending_sync != 'delete')`;
 
@@ -132,7 +136,7 @@ export class NotesDB {
 
 		const base = `
 			SELECT n.uid, n.account_id, n.folder, n.imap_uid, n.subject, n.body_html,
-			       n.created_at, n.modified_at, n.pending_sync, n.last_synced
+			       n.created_at, n.modified_at, n.pending_sync, n.last_synced, n.tags
 			FROM notes n
 			WHERE (n.pending_sync IS NULL OR n.pending_sync != 'delete')
 			  AND n.uid IN (SELECT uid FROM notes_fts WHERE notes_fts MATCH ?)`;
@@ -152,7 +156,7 @@ export class NotesDB {
 		const row = this.db
 			.query(
 				`SELECT uid, account_id, folder, imap_uid, subject, body_html,
-				        created_at, modified_at, pending_sync, last_synced
+				        created_at, modified_at, pending_sync, last_synced, tags
 				 FROM notes WHERE uid=?`,
 			)
 			.get(uid) as any;
@@ -162,13 +166,14 @@ export class NotesDB {
 	upsertNote(note: NoteRow): void {
 		this.db.run(
 			`INSERT INTO notes
-			   (uid, account_id, folder, imap_uid, subject, body_html, created_at, modified_at, pending_sync, last_synced)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   (uid, account_id, folder, imap_uid, subject, body_html, created_at, modified_at, pending_sync, last_synced, tags)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')
 			 ON CONFLICT(uid) DO UPDATE SET
 			   account_id=excluded.account_id, folder=excluded.folder,
 			   imap_uid=excluded.imap_uid, subject=excluded.subject,
 			   body_html=excluded.body_html, modified_at=excluded.modified_at,
 			   pending_sync=excluded.pending_sync, last_synced=excluded.last_synced`,
+			// tags intentionally excluded from UPDATE — preserve user-set tags across sync
 			[
 				note.uid,
 				note.accountId,
@@ -182,6 +187,11 @@ export class NotesDB {
 				note.lastSynced ?? null,
 			],
 		);
+	}
+
+	setNoteTags(uid: string, tags: string[]): NoteRow | null {
+		this.db.run("UPDATE notes SET tags=? WHERE uid=?", [JSON.stringify(tags), uid]);
+		return this.getNote(uid);
 	}
 
 	setPendingSync(uid: string, state: string | null) {
@@ -205,7 +215,7 @@ export class NotesDB {
 			this.db
 				.query(
 					`SELECT uid, account_id, folder, imap_uid, subject, body_html,
-					        created_at, modified_at, pending_sync, last_synced
+					        created_at, modified_at, pending_sync, last_synced, tags
 					 FROM notes WHERE account_id=? AND folder=?`,
 				)
 				.all(accountId, folder) as any[]
@@ -217,7 +227,7 @@ export class NotesDB {
 			this.db
 				.query(
 					`SELECT uid, account_id, folder, imap_uid, subject, body_html,
-					        created_at, modified_at, pending_sync, last_synced
+					        created_at, modified_at, pending_sync, last_synced, tags
 					 FROM notes WHERE account_id=? AND pending_sync=?`,
 				)
 				.all(accountId, operation) as any[]
@@ -278,5 +288,6 @@ function rowToNote(r: any): NoteRow {
 		modifiedAt: r.modified_at,
 		pendingSync: r.pending_sync ?? null,
 		lastSynced: r.last_synced ?? null,
+		tags: JSON.parse(r.tags || "[]"),
 	};
 }

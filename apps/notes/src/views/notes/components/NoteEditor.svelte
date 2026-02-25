@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy } from "svelte";
+	import { onDestroy, untrack } from "svelte";
 	import { Editor } from "@tiptap/core";
 	import StarterKit from "@tiptap/starter-kit";
 	import Underline from "@tiptap/extension-underline";
@@ -15,18 +15,61 @@
 		note,
 		onSave,
 		onTitleChange,
+		onDelete,
+		onTagsChange,
 	}: {
 		note: NoteRow | null;
 		onSave: (uid: string, bodyHtml: string) => void;
 		onTitleChange: (uid: string, subject: string) => void;
+		onDelete: (uid: string) => void;
+		onTagsChange: (uid: string, tags: string[]) => void;
 	} = $props();
 
 	let editorEl = $state<HTMLElement | undefined>();
 	let editor = $state<Editor | undefined>();
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 	let titleTimer: ReturnType<typeof setTimeout> | undefined;
+	let deleteTimer: ReturnType<typeof setTimeout> | undefined;
 	let currentNoteUid = $state<string | null>(null);
 	let editorUpdated = $state(0);
+	let confirmingDelete = $state(false);
+
+	// Tag editing
+	let addingTag = $state(false);
+	let newTagValue = $state("");
+	let tagInputEl = $state<HTMLInputElement | undefined>();
+
+	function removeTag(tag: string) {
+		if (!note) return;
+		onTagsChange(note.uid, note.tags.filter((t) => t !== tag));
+	}
+
+	function commitTag() {
+		if (!note) return;
+		const trimmed = newTagValue.trim().toLowerCase().replace(/\s+/g, "-");
+		if (trimmed && !note.tags.includes(trimmed)) {
+			onTagsChange(note.uid, [...note.tags, trimmed]);
+		}
+		newTagValue = "";
+		addingTag = false;
+	}
+
+	function handleTagKeydown(e: KeyboardEvent) {
+		if (e.key === "Enter" || e.key === ",") {
+			e.preventDefault();
+			commitTag();
+		} else if (e.key === "Escape") {
+			newTagValue = "";
+			addingTag = false;
+		}
+	}
+
+	$effect(() => {
+		if (addingTag) {
+			// Focus the input on next tick
+			setTimeout(() => tagInputEl?.focus(), 0);
+		}
+	});
 
 	$effect(() => {
 		if (!editorEl) return;
@@ -42,13 +85,13 @@
 				Typography,
 				Placeholder.configure({ placeholder: "Start writing…" }),
 			],
-			content: note?.bodyHtml ?? "",
+			content: untrack(() => note?.bodyHtml ?? ""),
 			onUpdate: ({ editor: ed }) => {
 				if (!note) return;
 				clearTimeout(saveTimer);
 				saveTimer = setTimeout(() => {
 					onSave(note.uid, ed.getHTML());
-				}, 600);
+				}, 2000);
 			},
 			onTransaction: () => {
 				editorUpdated++;
@@ -61,6 +104,8 @@
 				if (editor && note && note.uid !== currentNoteUid) {
 					currentNoteUid = note.uid;
 					clearTimeout(saveTimer);
+					clearTimeout(deleteTimer);
+					confirmingDelete = false;
 					editor.commands.setContent(note.bodyHtml || "");
 				}
 			});
@@ -78,8 +123,21 @@
 	onDestroy(() => {
 		clearTimeout(saveTimer);
 		clearTimeout(titleTimer);
+		clearTimeout(deleteTimer);
 		editor?.destroy();
 	});
+
+	function handleDeleteClick() {
+		if (!note) return;
+		if (confirmingDelete) {
+			clearTimeout(deleteTimer);
+			confirmingDelete = false;
+			onDelete(note.uid);
+		} else {
+			confirmingDelete = true;
+			deleteTimer = setTimeout(() => { confirmingDelete = false; }, 3000);
+		}
+	}
 
 	function handleTitleInput(e: Event) {
 		if (!note) return;
@@ -87,7 +145,7 @@
 		clearTimeout(titleTimer);
 		titleTimer = setTimeout(() => {
 			onTitleChange(note!.uid, val);
-		}, 600);
+		}, 2000);
 	}
 
 	function formatDate(iso: string): string {
@@ -109,16 +167,68 @@
 	<div class="flex flex-col h-full">
 		<!-- Title row -->
 		<div class="px-6 pt-5 pb-2 border-b border-surface-200-800">
-			<input
-				class="w-full bg-transparent text-xl font-semibold outline-none placeholder-surface-400"
-				placeholder="Title"
-				value={note.subject}
-				oninput={handleTitleInput}
-			/>
+			<div class="flex items-start gap-2">
+				<input
+					class="flex-1 bg-transparent text-xl font-semibold outline-none placeholder-surface-400"
+					placeholder="Title"
+					value={note.subject}
+					oninput={handleTitleInput}
+				/>
+				<button
+					type="button"
+					class="mt-1 p-1 rounded shrink-0 transition-colors {confirmingDelete ? 'text-error-500 bg-error-500/10 hover:bg-error-500/20' : 'text-surface-400 hover:text-error-500 hover:bg-error-500/10'}"
+					onclick={handleDeleteClick}
+					title={confirmingDelete ? 'Click again to confirm delete' : 'Delete note'}
+				>
+					{#if confirmingDelete}
+						<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<polyline points="20 6 9 17 4 12"/>
+						</svg>
+					{:else}
+						<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+						</svg>
+					{/if}
+				</button>
+			</div>
 			<div class="text-xs text-surface-500 mt-1">
 				{formatDate(note.modifiedAt)}
 				{#if note.pendingSync}
 					<span class="ml-2 text-warning-500">· unsaved</span>
+				{/if}
+				{#if confirmingDelete}
+					<span class="ml-2 text-error-500">· click trash again to confirm</span>
+				{/if}
+			</div>
+			<!-- Tags -->
+			<div class="flex flex-wrap items-center gap-1 mt-2">
+				{#each note.tags as tag}
+					<span class="inline-flex items-center gap-0.5 px-2 py-0.5 text-xs rounded-full bg-surface-200-800 text-surface-700-300">
+						{tag}
+						<button
+							type="button"
+							class="ml-0.5 opacity-60 hover:opacity-100 leading-none"
+							onclick={() => removeTag(tag)}
+							title="Remove tag"
+						>×</button>
+					</span>
+				{/each}
+				{#if addingTag}
+					<input
+						bind:this={tagInputEl}
+						bind:value={newTagValue}
+						type="text"
+						class="px-2 py-0.5 text-xs rounded-full border border-primary-400 bg-transparent outline-none w-24"
+						placeholder="tag name"
+						onkeydown={handleTagKeydown}
+						onblur={commitTag}
+					/>
+				{:else}
+					<button
+						type="button"
+						class="px-2 py-0.5 text-xs rounded-full border border-dashed border-surface-300-700 text-surface-400 hover:border-primary-400 hover:text-primary-500 transition-colors"
+						onclick={() => addingTag = true}
+					>+ tag</button>
 				{/if}
 			</div>
 		</div>
@@ -135,84 +245,3 @@
 		</div>
 	</div>
 {/if}
-
-<style>
-	:global(.note-editor .ProseMirror) {
-		outline: none;
-		min-height: 100%;
-		font-size: 0.9375rem;
-		line-height: 1.7;
-	}
-
-	:global(.note-editor .ProseMirror p.is-editor-empty:first-child::before) {
-		content: attr(data-placeholder);
-		float: left;
-		color: var(--color-surface-400);
-		pointer-events: none;
-		height: 0;
-	}
-
-	/* Headings */
-	:global(.note-editor .ProseMirror h1) { font-size: 1.5em; font-weight: 700; margin: 1em 0 0.3em; }
-	:global(.note-editor .ProseMirror h2) { font-size: 1.25em; font-weight: 600; margin: 0.9em 0 0.3em; }
-	:global(.note-editor .ProseMirror h3) { font-size: 1.1em; font-weight: 600; margin: 0.8em 0 0.25em; }
-
-	/* Paragraph spacing */
-	:global(.note-editor .ProseMirror p) { margin: 0.4em 0; }
-	:global(.note-editor .ProseMirror p:first-child) { margin-top: 0; }
-
-	/* Lists */
-	:global(.note-editor .ProseMirror ul) { list-style: disc; padding-left: 1.5em; margin: 0.4em 0; }
-	:global(.note-editor .ProseMirror ol) { list-style: decimal; padding-left: 1.5em; margin: 0.4em 0; }
-	:global(.note-editor .ProseMirror li > p) { margin: 0.1em 0; }
-
-	/* Task list */
-	:global(.note-editor .ProseMirror ul[data-type="taskList"]) { list-style: none; padding-left: 0.25em; }
-	:global(.note-editor .ProseMirror ul[data-type="taskList"] li) { display: flex; align-items: flex-start; gap: 0.5em; }
-	:global(.note-editor .ProseMirror ul[data-type="taskList"] li > label) { margin-top: 0.25em; }
-	:global(.note-editor .ProseMirror ul[data-type="taskList"] li > div) { flex: 1; }
-	:global(.note-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div) { text-decoration: line-through; opacity: 0.6; }
-
-	/* Blockquote */
-	:global(.note-editor .ProseMirror blockquote) {
-		border-left: 3px solid var(--color-surface-300-700);
-		padding-left: 1em;
-		margin: 0.5em 0;
-		color: var(--color-surface-600-400);
-		font-style: italic;
-	}
-
-	/* Code */
-	:global(.note-editor .ProseMirror code) {
-		background: var(--color-surface-100-900);
-		border-radius: 3px;
-		padding: 0.1em 0.3em;
-		font-family: ui-monospace, monospace;
-		font-size: 0.88em;
-	}
-	:global(.note-editor .ProseMirror pre) {
-		background: var(--color-surface-100-900);
-		border-radius: 6px;
-		padding: 0.75em 1em;
-		margin: 0.5em 0;
-		overflow-x: auto;
-	}
-	:global(.note-editor .ProseMirror pre code) {
-		background: none;
-		padding: 0;
-		font-size: 0.875em;
-	}
-
-	/* Links */
-	:global(.note-editor .ProseMirror a) {
-		color: var(--color-primary-500);
-		text-decoration: underline;
-	}
-
-	/* Horizontal rule */
-	:global(.note-editor .ProseMirror hr) {
-		border: none;
-		border-top: 1px solid var(--color-surface-200-800);
-		margin: 1em 0;
-	}
-</style>

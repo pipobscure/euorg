@@ -12,6 +12,7 @@ export interface NoteRow {
 	/** null = synced; 'create' | 'update' | 'delete' = pending push */
 	pendingSync: string | null;
 	lastSynced: number | null;
+	tags: string[];
 }
 
 export interface Account {

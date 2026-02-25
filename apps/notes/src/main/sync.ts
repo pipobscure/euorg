@@ -218,9 +218,31 @@ async function syncAccount(
 					const raw = fullMsg.source.toString("utf8");
 					const parsed = parseNoteMessage(raw);
 					const now = new Date().toISOString();
+					const noteUid = parsed.uuid || crypto.randomUUID();
+
+					// Duplicate detection: if we already have a note with this UUID but a
+					// different IMAP UID, one of them is an orphan left by a concurrent push.
+					// Keep the higher IMAP UID (most recently appended), delete the other.
+					if (parsed.uuid) {
+						const existingNote = db.getNote(parsed.uuid);
+						if (existingNote && existingNote.imapUid !== null && existingNote.imapUid !== imapUid) {
+							if (imapUid > existingNote.imapUid) {
+								// This server message is newer — delete the old orphan
+								console.log(`[sync] Removing duplicate note IMAP UID ${existingNote.imapUid} (orphan, keeping ${imapUid})`);
+								try { await client.messageDelete(`${existingNote.imapUid}`, { uid: true }); } catch {}
+								db.setImapUid(existingNote.uid, imapUid);
+							} else {
+								// Existing is newer — delete this orphan from server
+								console.log(`[sync] Removing duplicate note IMAP UID ${imapUid} (orphan, keeping ${existingNote.imapUid})`);
+								try { await client.messageDelete(`${imapUid}`, { uid: true }); } catch {}
+							}
+							onProgress({ phase: "Downloading notes", done: ++done, total: newUids.length, accountName: account.name });
+							continue;
+						}
+					}
 
 					db.upsertNote({
-						uid: parsed.uuid || crypto.randomUUID(),
+						uid: noteUid,
 						accountId: account.id,
 						folder,
 						imapUid,
@@ -230,6 +252,7 @@ async function syncAccount(
 						modifiedAt: parsed.date || now,
 						pendingSync: null,
 						lastSynced: Date.now(),
+						tags: [],
 					});
 					result.added++;
 				} catch (e) {

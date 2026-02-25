@@ -143,10 +143,15 @@
 			</button>
 			<button
 				type="button"
-				class="px-1.5 py-0.5 rounded hover:bg-surface-100-900 font-mono text-xs {s.code ? 'bg-surface-200-800' : ''}"
+				class="px-1.5 py-0.5 rounded hover:bg-surface-100-900 {s.code ? 'bg-surface-200-800' : ''}"
 				onmousedown={(e) => { e.preventDefault(); editor!.chain().focus().toggleCode().run(); }}
 				title="Inline code"
-			>`</button>
+			>
+				<svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+					<rect x="1" y="4" width="14" height="8" rx="1.5"/>
+					<path d="M5 8l-1.5 1 1.5 1M11 8l1.5 1-1.5 1" stroke-linecap="round" stroke-linejoin="round"/>
+				</svg>
+			</button>
 			<button
 				type="button"
 				class="px-1.5 py-0.5 rounded hover:bg-surface-100-900 {s.codeBlock ? 'bg-surface-200-800' : ''}"
