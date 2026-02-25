@@ -1,5 +1,14 @@
 // Shared types mirroring the main-process structures.
 
+export interface AttachmentRow {
+	id: string;
+	noteUid: string;
+	filename: string;
+	mimeType: string;
+	size: number;
+	storedPath: string;
+}
+
 export interface NoteRow {
 	uid: string;
 	accountId: string;
@@ -13,6 +22,7 @@ export interface NoteRow {
 	pendingSync: string | null;
 	lastSynced: number | null;
 	tags: string[];
+	attachments: AttachmentRow[];
 }
 
 export interface Account {

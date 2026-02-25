@@ -9,7 +9,7 @@
 	import Placeholder from "@tiptap/extension-placeholder";
 	import Typography from "@tiptap/extension-typography";
 	import Toolbar from "./Toolbar.svelte";
-	import type { NoteRow } from "../lib/types.ts";
+	import type { NoteRow, AttachmentRow } from "../lib/types.ts";
 
 	let {
 		note,
@@ -17,12 +17,24 @@
 		onTitleChange,
 		onDelete,
 		onTagsChange,
+		onAddAttachment,
+		onRemoveAttachment,
+		onOpenAttachment,
+		onGetAttachmentData,
+		onOpenUrl,
+		onSaveAttachment,
 	}: {
 		note: NoteRow | null;
 		onSave: (uid: string, bodyHtml: string) => void;
 		onTitleChange: (uid: string, subject: string) => void;
 		onDelete: (uid: string) => void;
 		onTagsChange: (uid: string, tags: string[]) => void;
+		onAddAttachment: (uid: string, filename: string, mimeType: string, data: string) => void;
+		onRemoveAttachment: (uid: string, attachmentId: string) => void;
+		onOpenAttachment: (attachmentId: string) => void;
+		onGetAttachmentData: (attachmentId: string) => Promise<{ data: string; mimeType: string; filename: string } | null>;
+		onOpenUrl: (url: string) => void;
+		onSaveAttachment: (attachmentId: string) => Promise<string | null>;
 	} = $props();
 
 	let editorEl = $state<HTMLElement | undefined>();
@@ -38,6 +50,11 @@
 	let addingTag = $state(false);
 	let newTagValue = $state("");
 	let tagInputEl = $state<HTMLInputElement | undefined>();
+
+	// Attachment state
+	let isDraggingOver = $state(false);
+	let fileInputEl = $state<HTMLInputElement | undefined>();
+	let contextMenu = $state<{ att: AttachmentRow; x: number; y: number } | null>(null);
 
 	function removeTag(tag: string) {
 		if (!note) return;
@@ -66,7 +83,6 @@
 
 	$effect(() => {
 		if (addingTag) {
-			// Focus the input on next tick
 			setTimeout(() => tagInputEl?.focus(), 0);
 		}
 	});
@@ -79,7 +95,7 @@
 			extensions: [
 				StarterKit,
 				Underline,
-				Link.configure({ openOnClick: false }),
+				Link.configure({ openOnClick: false, autolink: true, linkOnPaste: true }),
 				TaskList,
 				TaskItem.configure({ nested: true }),
 				Typography,
@@ -157,7 +173,123 @@
 			minute: "2-digit",
 		});
 	}
+
+	// ── Attachments ────────────────────────────────────────────────────────────
+
+	function formatSize(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	}
+
+	function fileIconForMime(mimeType: string): string {
+		if (/^image\//.test(mimeType)) return "🖼";
+		if (/^video\//.test(mimeType)) return "🎬";
+		if (/^audio\//.test(mimeType)) return "🎵";
+		if (/pdf/.test(mimeType)) return "📄";
+		if (/zip|archive|tar|gz|7z|rar/.test(mimeType)) return "🗜";
+		if (/text\//.test(mimeType)) return "📝";
+		if (/spreadsheet|excel|csv/.test(mimeType)) return "📊";
+		if (/presentation|powerpoint/.test(mimeType)) return "📊";
+		return "📎";
+	}
+
+	const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10 MB
+
+	async function processFiles(files: FileList | File[]) {
+		if (!note) return;
+		for (const file of Array.from(files)) {
+			if (file.size > MAX_ATTACHMENT_SIZE) {
+				alert(`"${file.name}" is too large (${formatSize(file.size)}). Maximum attachment size is 10 MB.`);
+				continue;
+			}
+			const data = await fileToBase64(file);
+			onAddAttachment(note.uid, file.name, file.type || "application/octet-stream", data);
+		}
+	}
+
+	function fileToBase64(file: File): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				// result is "data:mime;base64,..." — strip the prefix
+				const result = reader.result as string;
+				resolve(result.split(",")[1]);
+			};
+			reader.onerror = reject;
+			reader.readAsDataURL(file);
+		});
+	}
+
+	function handleDragOver(e: DragEvent) {
+		if (!note) return;
+		if (e.dataTransfer?.types.includes("Files")) {
+			e.preventDefault();
+			isDraggingOver = true;
+		}
+	}
+
+	function handleDragLeave(e: DragEvent) {
+		// Only clear if leaving the whole editor area
+		const related = e.relatedTarget as Node | null;
+		if (!editorWrapper?.contains(related)) {
+			isDraggingOver = false;
+		}
+	}
+
+	function handleDrop(e: DragEvent) {
+		e.preventDefault();
+		isDraggingOver = false;
+		if (!note || !e.dataTransfer?.files.length) return;
+		processFiles(e.dataTransfer.files);
+	}
+
+	function handleFileInput(e: Event) {
+		const files = (e.target as HTMLInputElement).files;
+		if (files) processFiles(files);
+		// Reset so the same file can be re-selected
+		(e.target as HTMLInputElement).value = "";
+	}
+
+	function handleEditorLinkClick(e: MouseEvent) {
+		const anchor = (e.target as Element).closest('a[href]') as HTMLAnchorElement | null;
+		if (!anchor) return;
+		e.preventDefault();
+		const href = anchor.getAttribute('href') || anchor.href;
+		if (!href) return;
+		// Only open URLs with a recognised scheme (the OS decides if a handler exists)
+		try {
+			const { protocol } = new URL(href);
+			if (protocol) onOpenUrl(href);
+		} catch { /* not a valid URL, ignore */ }
+	}
+
+	function showContextMenu(e: MouseEvent, att: AttachmentRow) {
+		e.preventDefault();
+		contextMenu = { att, x: e.clientX, y: e.clientY };
+	}
+
+	function closeContextMenu() {
+		contextMenu = null;
+	}
+
+	async function saveAttachmentCopy(att: AttachmentRow) {
+		closeContextMenu();
+		const dest = await onSaveAttachment(att.id);
+		if (dest) {
+			alert(`Saved to: ${dest}`);
+		}
+	}
+
+	let editorWrapper = $state<HTMLElement | undefined>();
 </script>
+
+<!-- Close context menu on click outside -->
+<svelte:window onclick={(e) => {
+	if (contextMenu && !(e.target as Element).closest('.attachment-context-menu')) {
+		closeContextMenu();
+	}
+}} />
 
 {#if !note}
 	<div class="flex items-center justify-center h-full text-surface-400 text-sm select-none">
@@ -234,14 +366,113 @@
 		</div>
 
 		<!-- Toolbar -->
-		<Toolbar {editor} {editorUpdated} />
+		<Toolbar {editor} {editorUpdated}>
+			{#snippet extra()}
+				<!-- Attach file button -->
+				<button
+					type="button"
+					class="btn-icon btn-icon-sm hover:preset-tonal rounded"
+					title="Attach file"
+					onclick={() => fileInputEl?.click()}
+				>
+					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+					</svg>
+				</button>
+				<input
+					bind:this={fileInputEl}
+					type="file"
+					multiple
+					class="hidden"
+					onchange={handleFileInput}
+				/>
+			{/snippet}
+		</Toolbar>
 
-		<!-- Editor area -->
-		<div class="flex-1 overflow-y-auto">
+		<!-- Editor area with drag-and-drop -->
+		<div
+			bind:this={editorWrapper}
+			class="flex-1 overflow-y-auto relative"
+			ondragover={handleDragOver}
+			ondragleave={handleDragLeave}
+			ondrop={handleDrop}
+			onclick={handleEditorLinkClick}
+		>
 			<div
 				bind:this={editorEl}
 				class="note-editor h-full px-6 py-4 outline-none"
 			></div>
+
+			<!-- Drop overlay -->
+			{#if isDraggingOver}
+				<div class="absolute inset-0 z-10 flex items-center justify-center bg-surface-50-950/80 border-2 border-dashed border-primary-500 rounded pointer-events-none">
+					<div class="text-center">
+						<svg class="w-10 h-10 mx-auto mb-2 text-primary-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+							<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+						</svg>
+						<p class="text-sm font-medium text-primary-500">Drop to attach</p>
+					</div>
+				</div>
+			{/if}
 		</div>
+
+		<!-- Attachment strip (shown when note has attachments) -->
+		{#if note.attachments && note.attachments.length > 0}
+			<div class="border-t border-surface-200-800 px-4 py-2 flex flex-wrap gap-2">
+				{#each note.attachments as att (att.id)}
+					<div
+						class="group relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-100-900 hover:bg-surface-200-800 cursor-pointer transition-colors text-sm"
+						onclick={() => onOpenAttachment(att.id)}
+						oncontextmenu={(e) => showContextMenu(e, att)}
+						title={att.filename}
+						role="button"
+						tabindex="0"
+						onkeydown={(e) => e.key === 'Enter' && onOpenAttachment(att.id)}
+					>
+						<span class="text-base leading-none select-none">{fileIconForMime(att.mimeType)}</span>
+						<div class="min-w-0">
+							<div class="truncate max-w-32 text-xs font-medium">{att.filename}</div>
+							<div class="text-xs text-surface-500">{formatSize(att.size)}</div>
+						</div>
+						<!-- Remove button (shown on hover) -->
+						<button
+							type="button"
+							class="ml-1 opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity text-surface-500 hover:text-error-500"
+							title="Remove attachment"
+							onclick={(e) => { e.stopPropagation(); note && onRemoveAttachment(note.uid, att.id); }}
+						>
+							<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+								<path d="M18 6 6 18M6 6l12 12"/>
+							</svg>
+						</button>
+					</div>
+				{/each}
+			</div>
+		{/if}
 	</div>
+
+	<!-- Context menu -->
+	{#if contextMenu}
+		<div
+			class="attachment-context-menu fixed z-50 bg-surface-50-950 border border-surface-200-800 rounded-lg shadow-lg py-1 min-w-32 text-sm"
+			style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+		>
+			<button
+				type="button"
+				class="w-full text-left px-3 py-1.5 hover:bg-surface-100-900 transition-colors"
+				onclick={() => { onOpenAttachment(contextMenu!.att.id); closeContextMenu(); }}
+			>Open</button>
+			<button
+				type="button"
+				class="w-full text-left px-3 py-1.5 hover:bg-surface-100-900 transition-colors"
+				onclick={() => saveAttachmentCopy(contextMenu!.att)}
+			>Save a copy…</button>
+			<div class="border-t border-surface-200-800 my-1"></div>
+			<button
+				type="button"
+				class="w-full text-left px-3 py-1.5 hover:bg-surface-100-900 text-error-500 transition-colors"
+				onclick={() => { note && onRemoveAttachment(note.uid, contextMenu!.att.id); closeContextMenu(); }}
+			>Remove</button>
+		</div>
+	{/if}
 {/if}

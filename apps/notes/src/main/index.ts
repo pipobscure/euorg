@@ -9,8 +9,11 @@ import {
 	type ImapConfig,
 } from "@euorg/shared/euorg-accounts.ts";
 import { getKeystoreType, setKeystoreType, type KeystoreType } from "@euorg/shared/keystore.ts";
-import { NotesDB, type NoteRow } from "./db.ts";
+import { NotesDB, type NoteRow, ATTACHMENTS_DIR } from "./db.ts";
 import { syncAll, buildNoteMessage, testImapConnection, isNetworkError, type SyncProgress, type SyncResult } from "./sync.ts";
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync, copyFileSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 
 // ── View types (password omitted) ─────────────────────────────────────────────
 
@@ -56,6 +59,12 @@ interface NotesRPCSchema extends ElectrobunRPCSchema {
 			setKeystoreType: { params: { type: KeystoreType }; response: void };
 			setNoteTags: { params: { uid: string; tags: string[] }; response: NoteRow | null };
 			logError: { params: { message: string; source?: string; lineno?: number }; response: void };
+			addAttachment: { params: { uid: string; filename: string; mimeType: string; data: string }; response: NoteRow | null };
+			removeAttachment: { params: { uid: string; attachmentId: string }; response: NoteRow | null };
+			openAttachment: { params: { attachmentId: string }; response: void };
+			getAttachmentData: { params: { attachmentId: string }; response: { data: string; mimeType: string; filename: string } | null };
+			openUrl: { params: { url: string }; response: void };
+			saveAttachment: { params: { attachmentId: string }; response: string | null };
 		};
 		messages: {};
 	}>;
@@ -91,6 +100,57 @@ function enabledImapAccountIds(accounts: EuorgAccount[]): string[] {
 // ── Database ──────────────────────────────────────────────────────────────────
 
 const db = new NotesDB();
+
+// ── File helpers ──────────────────────────────────────────────────────────────
+
+function openWithSystemApp(filePath: string) {
+	const cmd =
+		process.platform === "darwin" ? "open"
+		: process.platform === "win32" ? "explorer"
+		: "xdg-open";
+	Bun.spawn([cmd, filePath], { stdout: "ignore", stderr: "ignore" });
+}
+
+/** Returns the user's Downloads directory, cross-platform. */
+function getDownloadsDir(): string {
+	if (process.platform === "win32") {
+		return join(process.env.USERPROFILE ?? homedir(), "Downloads");
+	}
+	const xdg = process.env.XDG_DOWNLOAD_DIR;
+	if (xdg) return xdg;
+	return join(homedir(), "Downloads");
+}
+
+/** Push a note's current state (with attachments) to IMAP. Caller holds the pendingPushes lock. */
+async function pushNoteToImap(uid: string) {
+	const current = db.getNote(uid);
+	if (!current || current.pendingSync !== "update") return;
+	const account = readAccounts().accounts.find((a) => a.id === current.accountId);
+	if (!account) return;
+	const { ImapFlow } = await import("imapflow");
+	const client = new ImapFlow({
+		host: account.serverUrl,
+		port: account.imap?.port ?? 993,
+		secure: account.imap?.secure ?? true,
+		auth: { user: account.username, pass: account.password },
+		logger: false,
+	});
+	await client.connect();
+	const lock = await client.getMailboxLock(current.folder);
+	try {
+		if (current.imapUid !== null) {
+			await client.messageDelete(`${current.imapUid}`, { uid: true });
+		}
+		const raw = buildNoteMessage(current);
+		const appendResult = await client.append(current.folder, raw, ["\\Seen"], new Date(current.modifiedAt));
+		const newUid = (appendResult as any)?.uid ?? null;
+		db.setImapUid(uid, newUid ? Number(newUid) : null);
+		db.setPendingSync(uid, null);
+	} finally {
+		lock.release();
+		await client.logout();
+	}
+}
 
 // ── Per-note IMAP push lock ────────────────────────────────────────────────────
 // Prevents concurrent immediate-push operations for the same note, which would
@@ -189,38 +249,8 @@ const rpc = BrowserView.defineRPC<NotesRPCSchema>({
 				if (updated.pendingSync === "update" && !pendingPushes.has(uid)) {
 					pendingPushes.add(uid);
 					try {
-						const accounts = readAccounts().accounts;
-						const account = accounts.find((a) => a.id === updated.accountId);
-						if (account) {
-							const { ImapFlow } = await import("imapflow");
-							const client = new ImapFlow({
-								host: account.serverUrl,
-								port: account.imap?.port ?? 993,
-								secure: account.imap?.secure ?? true,
-								auth: { user: account.username, pass: account.password },
-								logger: false,
-							});
-							await client.connect();
-							// Re-read current note state — any edits that arrived while connecting
-							// have already been written to DB, so we push the latest content.
-							const current = db.getNote(uid);
-							if (current?.pendingSync === "update") {
-								const lock = await client.getMailboxLock(current.folder);
-								try {
-									if (current.imapUid !== null) {
-										await client.messageDelete(`${current.imapUid}`, { uid: true });
-									}
-									const raw = buildNoteMessage(current);
-									const appendResult = await client.append(current.folder, raw, ["\\Seen"], new Date(current.modifiedAt));
-									const newUid = (appendResult as any)?.uid ?? null;
-									db.setImapUid(uid, newUid ? Number(newUid) : null);
-									db.setPendingSync(uid, null);
-								} finally {
-									lock.release();
-								}
-							}
-							await client.logout();
-						}
+						// Re-read fresh state and push via shared helper (includes attachments)
+						await pushNoteToImap(uid);
 					} catch (e) {
 						if (!isNetworkError(e)) throw e;
 						console.log(`[offline] updateNote ${uid}: network error, will sync later`);
@@ -360,6 +390,86 @@ const rpc = BrowserView.defineRPC<NotesRPCSchema>({
 
 			async logError({ message, source, lineno }) {
 				console.error(`[webview]`, message, source ? `(${source}:${lineno})` : "");
+			},
+
+			// ── Attachments ─────────────────────────────────────────────────────
+			async addAttachment({ uid, filename, mimeType, data }) {
+				const existing = db.getNote(uid);
+				if (!existing) return null;
+
+				const attachmentId = crypto.randomUUID();
+				const attDir = join(ATTACHMENTS_DIR, uid);
+				mkdirSync(attDir, { recursive: true });
+				const storedPath = join(attDir, `${attachmentId}_${filename}`);
+				writeFileSync(storedPath, Buffer.from(data, "base64"));
+
+				db.addAttachmentRow({ id: attachmentId, noteUid: uid, filename, mimeType,
+					size: Buffer.from(data, "base64").length, storedPath });
+
+				// Mark note as pending update so the attachment travels to IMAP
+				const pendingState = existing.pendingSync === "create" ? "create" : "update";
+				db.setPendingSync(uid, pendingState);
+				if (pendingState === "update" && !pendingPushes.has(uid)) {
+					pendingPushes.add(uid);
+					pushNoteToImap(uid).finally(() => pendingPushes.delete(uid));
+				}
+
+				rpc.send("noteChanged", { uid, action: "updated" });
+				return db.getNote(uid);
+			},
+
+			async removeAttachment({ uid, attachmentId }) {
+				const att = db.removeAttachment(attachmentId);
+				if (att) {
+					try { unlinkSync(att.storedPath); } catch {}
+				}
+
+				const existing = db.getNote(uid);
+				if (existing) {
+					const pendingState = existing.pendingSync === "create" ? "create" : "update";
+					db.setPendingSync(uid, pendingState);
+					if (pendingState === "update" && !pendingPushes.has(uid)) {
+						pendingPushes.add(uid);
+						pushNoteToImap(uid).finally(() => pendingPushes.delete(uid));
+					}
+				}
+
+				rpc.send("noteChanged", { uid, action: "updated" });
+				return db.getNote(uid);
+			},
+
+			async openAttachment({ attachmentId }) {
+				const att = db.getAttachmentById(attachmentId);
+				if (!att) return;
+				openWithSystemApp(att.storedPath);
+			},
+
+			async getAttachmentData({ attachmentId }) {
+				const att = db.getAttachmentById(attachmentId);
+				if (!att || !existsSync(att.storedPath)) return null;
+				const data = readFileSync(att.storedPath).toString("base64");
+				return { data, mimeType: att.mimeType, filename: att.filename };
+			},
+
+			async openUrl({ url }) {
+				openWithSystemApp(url);
+			},
+
+			async saveAttachment({ attachmentId }) {
+				const att = db.getAttachmentById(attachmentId);
+				if (!att || !existsSync(att.storedPath)) return null;
+				const downloadsDir = getDownloadsDir();
+				mkdirSync(downloadsDir, { recursive: true });
+				// Avoid clobbering existing files with the same name
+				let dest = join(downloadsDir, att.filename);
+				if (existsSync(dest)) {
+					const ext = att.filename.lastIndexOf(".");
+					const base = ext >= 0 ? att.filename.slice(0, ext) : att.filename;
+					const suffix = ext >= 0 ? att.filename.slice(ext) : "";
+					dest = join(downloadsDir, `${base} (copy)${suffix}`);
+				}
+				copyFileSync(att.storedPath, dest);
+				return dest;
 			},
 		},
 

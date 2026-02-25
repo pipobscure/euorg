@@ -118,6 +118,36 @@
 		}
 	}
 
+	async function handleAddAttachment(uid: string, filename: string, mimeType: string, data: string) {
+		const updated = await rpc.request.addAttachment({ uid, filename, mimeType, data });
+		if (updated) {
+			notes = notes.map((n) => (n.uid === uid ? updated : n));
+		}
+	}
+
+	async function handleRemoveAttachment(uid: string, attachmentId: string) {
+		const updated = await rpc.request.removeAttachment({ uid, attachmentId });
+		if (updated) {
+			notes = notes.map((n) => (n.uid === uid ? updated : n));
+		}
+	}
+
+	async function handleOpenAttachment(attachmentId: string) {
+		await rpc.request.openAttachment({ attachmentId });
+	}
+
+	async function handleGetAttachmentData(attachmentId: string) {
+		return rpc.request.getAttachmentData({ attachmentId });
+	}
+
+	async function handleOpenUrl(url: string) {
+		await rpc.request.openUrl({ url });
+	}
+
+	async function handleSaveAttachment(attachmentId: string) {
+		return rpc.request.saveAttachment({ attachmentId });
+	}
+
 	async function handleSearch(q: string) {
 		searchQuery = q;
 		await loadNotes();
@@ -213,6 +243,12 @@
 				onTitleChange={handleTitleChange}
 				onDelete={handleDelete}
 				onTagsChange={handleTagsChange}
+				onAddAttachment={handleAddAttachment}
+				onRemoveAttachment={handleRemoveAttachment}
+				onOpenAttachment={handleOpenAttachment}
+				onGetAttachmentData={handleGetAttachmentData}
+				onOpenUrl={handleOpenUrl}
+				onSaveAttachment={handleSaveAttachment}
 			/>
 		</div>
 	</div>

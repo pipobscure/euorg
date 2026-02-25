@@ -1,12 +1,15 @@
 <script lang="ts">
 	import type { Editor } from "@tiptap/core";
+	import type { Snippet } from "svelte";
 
 	let {
 		editor,
 		editorUpdated = 0,
+		extra,
 	}: {
 		editor: Editor | undefined;
 		editorUpdated?: number;
+		extra?: Snippet;
 	} = $props();
 
 	// Recomputes whenever editorUpdated increments (i.e. on every TipTap transaction)
@@ -191,5 +194,12 @@
 				</svg>
 			</button>
 		</div>
+
+		{#if extra}
+			<div class="w-px h-4 bg-surface-200-800 mx-1"></div>
+			<div class="flex items-center gap-0.5">
+				{@render extra()}
+			</div>
+		{/if}
 	</div>
 {/if}

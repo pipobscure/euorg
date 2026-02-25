@@ -14,10 +14,21 @@ import { EUORG_DIR } from "@euorg/shared/euorg-accounts.ts";
 
 export const NOTES_DIR = join(EUORG_DIR, "notes");
 export const DB_PATH = join(NOTES_DIR, "notes.db");
+export const ATTACHMENTS_DIR = join(NOTES_DIR, "attachments");
 
 mkdirSync(NOTES_DIR, { recursive: true });
+mkdirSync(ATTACHMENTS_DIR, { recursive: true });
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+export interface AttachmentRow {
+	id: string;
+	noteUid: string;
+	filename: string;
+	mimeType: string;
+	size: number;
+	storedPath: string;
+}
 
 export interface NoteRow {
 	uid: string;
@@ -33,6 +44,7 @@ export interface NoteRow {
 	pendingSync: string | null;
 	lastSynced: number | null;
 	tags: string[];
+	attachments: AttachmentRow[];
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -104,6 +116,18 @@ export class NotesDB {
 				VALUES (new.rowid, new.uid, new.subject, new.body_html);
 			END
 		`);
+
+		// Attachments table
+		this.db.run(`
+			CREATE TABLE IF NOT EXISTS note_attachments (
+				id          TEXT PRIMARY KEY,
+				note_uid    TEXT NOT NULL,
+				filename    TEXT NOT NULL,
+				mime_type   TEXT NOT NULL,
+				size        INTEGER NOT NULL,
+				stored_path TEXT NOT NULL
+			)
+		`);
 	}
 
 	close() {
@@ -119,20 +143,21 @@ export class NotesDB {
 			FROM notes
 			WHERE (pending_sync IS NULL OR pending_sync != 'delete')`;
 
+		let rows: any[];
 		if (!accountIds || accountIds.length === 0) {
-			return (this.db.query(base + " ORDER BY modified_at DESC").all() as any[]).map(rowToNote);
-		}
-		const placeholders = accountIds.map(() => "?").join(",");
-		return (
-			this.db
+			rows = this.db.query(base + " ORDER BY modified_at DESC").all() as any[];
+		} else {
+			const placeholders = accountIds.map(() => "?").join(",");
+			rows = this.db
 				.query(`${base} AND account_id IN (${placeholders}) ORDER BY modified_at DESC`)
-				.all(...accountIds) as any[]
-		).map(rowToNote);
+				.all(...accountIds) as any[];
+		}
+		return rows.map((r) => this.rowToNote(r));
 	}
 
 	searchNotes(query: string, accountIds?: string[]): NoteRow[] {
 		if (!query.trim()) return this.getNotes(accountIds);
-		const escaped = query.replace(/['"*]/g, " ").trim() + "*";
+		const escaped = query.replace(/['\"*]/g, " ").trim() + "*";
 
 		const base = `
 			SELECT n.uid, n.account_id, n.folder, n.imap_uid, n.subject, n.body_html,
@@ -141,15 +166,16 @@ export class NotesDB {
 			WHERE (n.pending_sync IS NULL OR n.pending_sync != 'delete')
 			  AND n.uid IN (SELECT uid FROM notes_fts WHERE notes_fts MATCH ?)`;
 
+		let rows: any[];
 		if (!accountIds || accountIds.length === 0) {
-			return (this.db.query(base + " ORDER BY n.modified_at DESC").all(escaped) as any[]).map(rowToNote);
-		}
-		const placeholders = accountIds.map(() => "?").join(",");
-		return (
-			this.db
+			rows = this.db.query(base + " ORDER BY n.modified_at DESC").all(escaped) as any[];
+		} else {
+			const placeholders = accountIds.map(() => "?").join(",");
+			rows = this.db
 				.query(`${base} AND n.account_id IN (${placeholders}) ORDER BY n.modified_at DESC`)
-				.all(escaped, ...accountIds) as any[]
-		).map(rowToNote);
+				.all(escaped, ...accountIds) as any[];
+		}
+		return rows.map((r) => this.rowToNote(r));
 	}
 
 	getNote(uid: string): NoteRow | null {
@@ -160,7 +186,7 @@ export class NotesDB {
 				 FROM notes WHERE uid=?`,
 			)
 			.get(uid) as any;
-		return row ? rowToNote(row) : null;
+		return row ? this.rowToNote(row) : null;
 	}
 
 	upsertNote(note: NoteRow): void {
@@ -219,7 +245,7 @@ export class NotesDB {
 					 FROM notes WHERE account_id=? AND folder=?`,
 				)
 				.all(accountId, folder) as any[]
-		).map(rowToNote);
+		).map((r) => this.rowToNote(r));
 	}
 
 	getPendingNotes(accountId: string, operation: string): NoteRow[] {
@@ -231,7 +257,7 @@ export class NotesDB {
 					 FROM notes WHERE account_id=? AND pending_sync=?`,
 				)
 				.all(accountId, operation) as any[]
-		).map(rowToNote);
+		).map((r) => this.rowToNote(r));
 	}
 
 	countNotes(accountIds?: string[]): number {
@@ -272,22 +298,84 @@ export class NotesDB {
 	clearImapUids(accountId: string, folder: string) {
 		this.db.run("UPDATE notes SET imap_uid=NULL WHERE account_id=? AND folder=?", [accountId, folder]);
 	}
+
+	// ── Attachments ────────────────────────────────────────────────────────────
+
+	getAttachments(noteUid: string): AttachmentRow[] {
+		return (
+			this.db
+				.query("SELECT id, note_uid, filename, mime_type, size, stored_path FROM note_attachments WHERE note_uid=?")
+				.all(noteUid) as any[]
+		).map(rowToAttachment);
+	}
+
+	addAttachmentRow(row: AttachmentRow): void {
+		this.db.run(
+			`INSERT INTO note_attachments (id, note_uid, filename, mime_type, size, stored_path)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   filename=excluded.filename, mime_type=excluded.mime_type,
+			   size=excluded.size, stored_path=excluded.stored_path`,
+			[row.id, row.noteUid, row.filename, row.mimeType, row.size, row.storedPath],
+		);
+	}
+
+	removeAttachment(id: string): AttachmentRow | null {
+		const row = this.db
+			.query("SELECT id, note_uid, filename, mime_type, size, stored_path FROM note_attachments WHERE id=?")
+			.get(id) as any;
+		if (!row) return null;
+		this.db.run("DELETE FROM note_attachments WHERE id=?", [id]);
+		return rowToAttachment(row);
+	}
+
+	removeAttachmentsByNote(noteUid: string): AttachmentRow[] {
+		const rows = (
+			this.db
+				.query("SELECT id, note_uid, filename, mime_type, size, stored_path FROM note_attachments WHERE note_uid=?")
+				.all(noteUid) as any[]
+		).map(rowToAttachment);
+		this.db.run("DELETE FROM note_attachments WHERE note_uid=?", [noteUid]);
+		return rows;
+	}
+
+	getAttachmentById(id: string): AttachmentRow | null {
+		const row = this.db
+			.query("SELECT id, note_uid, filename, mime_type, size, stored_path FROM note_attachments WHERE id=?")
+			.get(id) as any;
+		return row ? rowToAttachment(row) : null;
+	}
+
+	// ── Row mapper ─────────────────────────────────────────────────────────────
+
+	private rowToNote(r: any): NoteRow {
+		const uid = r.uid;
+		return {
+			uid,
+			accountId: r.account_id,
+			folder: r.folder,
+			imapUid: r.imap_uid ?? null,
+			subject: r.subject,
+			bodyHtml: r.body_html,
+			createdAt: r.created_at,
+			modifiedAt: r.modified_at,
+			pendingSync: r.pending_sync ?? null,
+			lastSynced: r.last_synced ?? null,
+			tags: JSON.parse(r.tags || "[]"),
+			attachments: this.getAttachments(uid),
+		};
+	}
 }
 
 // ── Row mapper ────────────────────────────────────────────────────────────────
 
-function rowToNote(r: any): NoteRow {
+function rowToAttachment(r: any): AttachmentRow {
 	return {
-		uid: r.uid,
-		accountId: r.account_id,
-		folder: r.folder,
-		imapUid: r.imap_uid ?? null,
-		subject: r.subject,
-		bodyHtml: r.body_html,
-		createdAt: r.created_at,
-		modifiedAt: r.modified_at,
-		pendingSync: r.pending_sync ?? null,
-		lastSynced: r.last_synced ?? null,
-		tags: JSON.parse(r.tags || "[]"),
+		id: r.id,
+		noteUid: r.note_uid,
+		filename: r.filename,
+		mimeType: r.mime_type,
+		size: r.size,
+		storedPath: r.stored_path,
 	};
 }

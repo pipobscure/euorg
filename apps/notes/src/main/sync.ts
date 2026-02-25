@@ -14,7 +14,10 @@
  */
 
 import { ImapFlow } from "imapflow";
+import { mkdirSync, writeFileSync, readFileSync } from "fs";
+import { join } from "path";
 import type { NotesDB, NoteRow } from "./db.ts";
+import { ATTACHMENTS_DIR } from "./db.ts";
 import type { EuorgAccount } from "@euorg/shared/euorg-accounts.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -253,7 +256,30 @@ async function syncAccount(
 						pendingSync: null,
 						lastSynced: Date.now(),
 						tags: [],
+						attachments: [],
 					});
+
+					// Write attachment files to disk and record in DB
+					db.removeAttachmentsByNote(noteUid);
+					for (const att of parsed.attachments) {
+						try {
+							const attDir = join(ATTACHMENTS_DIR, noteUid);
+							mkdirSync(attDir, { recursive: true });
+							const storedPath = join(attDir, `${att.id}_${att.filename}`);
+							writeFileSync(storedPath, att.data);
+							db.addAttachmentRow({
+								id: att.id,
+								noteUid,
+								filename: att.filename,
+								mimeType: att.mimeType,
+								size: att.data.length,
+								storedPath,
+							});
+						} catch (e) {
+							console.warn(`[sync] Could not save attachment ${att.filename}:`, e);
+						}
+					}
+
 					result.added++;
 				} catch (e) {
 					result.errors.push(`UID ${imapUid}: ${String(e instanceof Error ? e.message : e)}`);
@@ -276,16 +302,67 @@ export function buildNoteMessage(note: NoteRow): string {
 	const subject = encodeSubject(note.subject || "Untitled");
 	const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>${note.bodyHtml}</body></html>`;
 
-	return [
+	// Notes without attachments use a simple single-part message (backward compatible)
+	if (!note.attachments || note.attachments.length === 0) {
+		return [
+			"MIME-Version: 1.0",
+			`Date: ${date}`,
+			`Subject: ${subject}`,
+			"Content-Type: text/html; charset=UTF-8",
+			"X-Uniform-Type-Identifier: com.apple.mail-note",
+			`X-Universally-Unique-Identifier: ${note.uid}`,
+			"",
+			html,
+		].join("\r\n");
+	}
+
+	// Notes with attachments use multipart/mixed
+	const boundary = `euorg-${crypto.randomUUID()}`;
+	const CRLF = "\r\n";
+	const sep = `--${boundary}`;
+	const end = `--${boundary}--`;
+
+	const parts: string[] = [
+		// HTML body as first part
+		[
+			`${sep}`,
+			"Content-Type: text/html; charset=UTF-8",
+			"",
+			html,
+		].join(CRLF),
+	];
+
+	for (const att of note.attachments) {
+		try {
+			const data = readFileSync(att.storedPath);
+			const b64 = data.toString("base64");
+			const encodedFilename = encodeAttachmentFilename(att.filename);
+			parts.push([
+				`${sep}`,
+				`Content-Type: ${att.mimeType}`,
+				"Content-Transfer-Encoding: base64",
+				`Content-Disposition: attachment; ${encodedFilename}`,
+				`X-Attachment-Id: ${att.id}`,
+				"",
+				b64,
+			].join(CRLF));
+		} catch (e) {
+			console.warn(`[buildNoteMessage] Could not read attachment ${att.id} (${att.filename}):`, e);
+		}
+	}
+
+	parts.push(end);
+
+	const headers = [
 		"MIME-Version: 1.0",
 		`Date: ${date}`,
 		`Subject: ${subject}`,
-		"Content-Type: text/html; charset=UTF-8",
+		`Content-Type: multipart/mixed; boundary="${boundary}"`,
 		"X-Uniform-Type-Identifier: com.apple.mail-note",
 		`X-Universally-Unique-Identifier: ${note.uid}`,
-		"",
-		html,
-	].join("\r\n");
+	].join(CRLF);
+
+	return headers + CRLF + CRLF + parts.join(CRLF);
 }
 
 // ── MIME parsing ──────────────────────────────────────────────────────────────
@@ -409,6 +486,7 @@ export function parseNoteMessage(raw: string): {
 	subject: string;
 	date: string;
 	bodyHtml: string;
+	attachments: { id: string; filename: string; mimeType: string; data: Buffer }[];
 } {
 	const { headers } = splitHeadersBody(raw);
 
@@ -423,8 +501,66 @@ export function parseNoteMessage(raw: string): {
 	}
 
 	const bodyHtml = extractHtmlFromMime(raw);
+	const attachments = extractAttachmentsFromMime(raw);
 
-	return { uuid, subject, date, bodyHtml };
+	return { uuid, subject, date, bodyHtml, attachments };
+}
+
+/** Extract attachment parts from a MIME message. Returns binary data for each. */
+function extractAttachmentsFromMime(
+	raw: string,
+): { id: string; filename: string; mimeType: string; data: Buffer }[] {
+	const { headers, body } = splitHeadersBody(raw);
+	const contentType = headers["content-type"] ?? "";
+	if (!/multipart\//i.test(contentType)) return [];
+
+	const boundaryMatch = contentType.match(/boundary="?([^";]+)"?/i);
+	if (!boundaryMatch) return [];
+	const boundary = "--" + boundaryMatch[1].trim();
+
+	const lines = body.split(/\r?\n/);
+	const parts: string[] = [];
+	let current: string[] = [];
+	let inPart = false;
+
+	for (const line of lines) {
+		if (line === boundary || line === boundary + "--") {
+			if (inPart) parts.push(current.join("\n"));
+			current = [];
+			inPart = line !== boundary + "--";
+		} else if (inPart) {
+			current.push(line);
+		}
+	}
+
+	const attachments: { id: string; filename: string; mimeType: string; data: Buffer }[] = [];
+	for (const part of parts) {
+		const { headers: ph, body: pb } = splitHeadersBody(part);
+		const disposition = ph["content-disposition"] ?? "";
+		if (!/attachment/i.test(disposition)) continue;
+
+		const mimeType = (ph["content-type"] ?? "application/octet-stream").split(";")[0].trim();
+		const encoding = ph["content-transfer-encoding"] ?? "7bit";
+		const id = ph["x-attachment-id"] ?? crypto.randomUUID();
+
+		// Extract filename from Content-Disposition
+		const filenameMatch = disposition.match(/filename\*=UTF-8\'\'\'?([^;\s]+)/i)
+			?? disposition.match(/filename="([^"]+)"/i)
+			?? disposition.match(/filename=([^;\s]+)/i);
+		const filename = filenameMatch
+			? decodeURIComponent(filenameMatch[1].replace(/\+/g, " "))
+			: "attachment";
+
+		let data: Buffer;
+		if (encoding.toLowerCase() === "base64") {
+			data = Buffer.from(pb.replace(/\s+/g, ""), "base64");
+		} else {
+			data = Buffer.from(pb, "utf8");
+		}
+
+		attachments.push({ id, filename, mimeType, data });
+	}
+	return attachments;
 }
 
 function extractBodyContent(html: string): string {
@@ -461,6 +597,13 @@ function encodeSubject(subject: string): string {
 	if (!/[^\x20-\x7E]/.test(subject)) return subject;
 	const encoded = Buffer.from(subject, "utf8").toString("base64");
 	return `=?UTF-8?B?${encoded}?=`;
+}
+
+/** Encode a filename for Content-Disposition, using RFC 5987 for non-ASCII. */
+function encodeAttachmentFilename(filename: string): string {
+	if (!/[^\x20-\x7E]/.test(filename)) return `filename="${filename}"`;
+	const encoded = encodeURIComponent(filename);
+	return `filename*=UTF-8''${encoded}`;
 }
 
 function formatRFC2822(date: Date): string {
