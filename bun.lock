@@ -20,6 +20,7 @@
       "dependencies": {
         "@euorg/shared": "workspace:*",
         "@js-temporal/polyfill": "^0.5.1",
+        "@pipobscure/ical": "^1.0.0",
         "@pipobscure/xml": "^1.0.3",
         "electrobun": "1.13.1",
         "nodemailer": "^8.0.1",
@@ -99,6 +100,8 @@
     "@malept/cross-spawn-promise": ["@malept/cross-spawn-promise@1.1.1", "", { "dependencies": { "cross-spawn": "^7.0.1" } }, "sha512-RTBGWL5FWQcg9orDOCcp4LvItNzUPcyEU9bwaeJX0rJ1IQxzucC48Y0/sQLp/g6t99IQgAlGIaesJS+gTn7tVQ=="],
 
     "@pinojs/redact": ["@pinojs/redact@0.4.0", "", {}, "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg=="],
+
+    "@pipobscure/ical": ["@pipobscure/ical@1.0.0", "", {}, "sha512-wNcBtvvP3d3n3qQlSLDmWh8hdqfn8YyynoI4VC/IZyo+MT+AVdQ6xRDJNP1p9/kUxs7Ni+8tqsep8y8Z3iD1Yg=="],
 
     "@pipobscure/vcard": ["@pipobscure/vcard@1.0.1", "", {}, "sha512-Z8qiLMCdopQUbSaZyHehLYBFg8nRY6CIMX65Fvi+d6e8972c2QyV4EgIpDX3YmJwzr+A/bP7Fuc5gL8Stp4xSQ=="],
 
